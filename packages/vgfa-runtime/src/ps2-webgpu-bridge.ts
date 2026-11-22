@@ -52,14 +52,13 @@ export async function probePs2WebCapabilities(): Promise<WebGpuCapabilities> {
 
   let wasmSimdSupported = false;
   try {
-    // Módulo WASM mínimo (v128.const) para detectar suporte a SIMD128
+    // Módulo WASM padrão (wasm-feature-detect) para testar suporte real a SIMD128
     wasmSimdSupported =
       typeof WebAssembly !== 'undefined' &&
       WebAssembly.validate(
         new Uint8Array([
-          0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x05, 0x01, 0x60, 0x00, 0x01,
-          0x7b, 0x03, 0x02, 0x01, 0x00, 0x0a, 0x0a, 0x01, 0x08, 0x00, 0x41, 0x00, 0xfd, 0x0f,
-          0x0b,
+          0, 97, 115, 109, 1, 0, 0, 0, 1, 5, 1, 96, 0, 1, 123, 3, 2, 1, 0, 10, 10, 1, 8, 0, 65, 0,
+          253, 15, 253, 98, 11,
         ]),
       );
   } catch {

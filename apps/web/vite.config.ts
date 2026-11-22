@@ -6,10 +6,10 @@ export default defineConfig({
   server: {
     host: '0.0.0.0',
     port: 5173,
-    // Headers obrigatórios para SharedArrayBuffer multi-thread (WASM pthreads / PS2 WebGPU)
+    // Headers obrigatórios para SharedArrayBuffer em Safari, Chrome, Edge e Firefox
     headers: {
       'Cross-Origin-Opener-Policy': 'same-origin',
-      'Cross-Origin-Embedder-Policy': 'credentialless',
+      'Cross-Origin-Embedder-Policy': 'require-corp',
     },
     proxy: {
       '/api': {
@@ -23,7 +23,7 @@ export default defineConfig({
     port: 5173,
     headers: {
       'Cross-Origin-Opener-Policy': 'same-origin',
-      'Cross-Origin-Embedder-Policy': 'credentialless',
+      'Cross-Origin-Embedder-Policy': 'require-corp',
     },
   },
 });

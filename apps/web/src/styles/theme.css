@@ -846,3 +846,276 @@ select {
   background: linear-gradient(90deg, var(--amber), var(--cyan));
   transition: width 0.15s ease;
 }
+
+/* ==================== Mobile Ergonomic Inline Controller ==================== */
+.mobile-player-shell {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  max-width: 100vw;
+  height: 100dvh;
+  z-index: 60;
+  background: #05060a;
+  display: flex;
+  flex-direction: column;
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+  padding-left: env(safe-area-inset-left, 0px);
+  padding-right: env(safe-area-inset-right, 0px);
+  overflow: hidden;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.mobile-stage-bar {
+  flex: 0 0 auto;
+  width: 100%;
+  max-width: 100vw;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 12px;
+  background: rgba(14, 17, 26, 0.95);
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+}
+
+.mobile-screen-area {
+  flex: 1 1 auto;
+  width: 100%;
+  max-width: 100vw;
+  min-height: 180px;
+  background: #000;
+  position: relative;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+}
+
+.mobile-screen-area iframe,
+.mobile-screen-area canvas {
+  width: 100% !important;
+  max-width: 100vw !important;
+  height: 100% !important;
+  border: none;
+}
+
+.mobile-deck {
+  flex: 0 0 auto;
+  width: 100%;
+  max-width: 100vw;
+  background: linear-gradient(180deg, #0d111b, #07080d);
+  border-top: 1px solid var(--border);
+  padding: 8px 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  touch-action: none;
+  overflow: hidden;
+}
+
+.mobile-deck-shoulders {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+
+.mobile-shoulder {
+  min-width: 58px;
+  padding: 8px 12px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: #1a2234;
+  color: #f8fafc;
+  font-size: 12px;
+  font-weight: 800;
+  touch-action: none;
+}
+
+.mobile-shoulder.pressed {
+  background: var(--amber);
+  color: #07080d;
+}
+
+.mobile-deck-main {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: center;
+  gap: 8px;
+}
+
+.mobile-zone-left,
+.mobile-zone-right {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+}
+
+.mobile-zone-center {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: center;
+}
+
+.mobile-center-btn {
+  padding: 7px 11px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  background: #182032;
+  color: #cbd5e1;
+  font-size: 10px;
+  font-weight: 800;
+  touch-action: none;
+}
+
+.mobile-center-btn.pressed {
+  background: var(--amber);
+  color: #07080d;
+}
+
+.mobile-dpad {
+  display: grid;
+  grid-template-columns: repeat(3, 44px);
+  grid-template-rows: repeat(3, 44px);
+  gap: 3px;
+}
+
+.mobile-dkey {
+  border-radius: 9px;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  background: #182032;
+  color: #e2e8f0;
+  font-size: 14px;
+  font-weight: 800;
+  display: grid;
+  place-items: center;
+  touch-action: none;
+}
+
+.mobile-dkey.pressed {
+  background: var(--amber);
+  color: #07080d;
+}
+
+.mobile-dcenter {
+  border-radius: 8px;
+  background: #101624;
+}
+
+.mobile-stick {
+  width: 104px;
+  height: 104px;
+  border-radius: 999px;
+  border: 2px solid rgba(148, 163, 184, 0.35);
+  background: radial-gradient(circle, #1e293b, #0f172a);
+  position: relative;
+  touch-action: none;
+}
+
+.mobile-stick-knob {
+  width: 44px;
+  height: 44px;
+  border-radius: 999px;
+  background: #334155;
+  border: 2px solid var(--amber);
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  pointer-events: none;
+}
+
+.mobile-diamond {
+  display: grid;
+  grid-template-columns: repeat(3, 46px);
+  grid-template-rows: repeat(3, 46px);
+  gap: 3px;
+  align-items: center;
+  justify-items: center;
+}
+
+.mobile-face-sm {
+  width: 46px;
+  height: 46px;
+  border-radius: 999px;
+  border: 2px solid rgba(255, 255, 255, 0.2);
+  font-size: 16px;
+  font-weight: 800;
+  display: grid;
+  place-items: center;
+  touch-action: none;
+}
+
+.mobile-face-md {
+  width: 56px;
+  height: 56px;
+  border-radius: 999px;
+  border: 2px solid rgba(255, 255, 255, 0.22);
+  font-size: 18px;
+  font-weight: 800;
+  display: grid;
+  place-items: center;
+  touch-action: none;
+}
+
+.mobile-face-lg {
+  width: 78px;
+  height: 78px;
+  border-radius: 999px;
+  border: 2px solid rgba(255, 255, 255, 0.25);
+  font-size: 14px;
+  font-weight: 800;
+  display: grid;
+  place-items: center;
+  touch-action: none;
+}
+
+.mobile-face-sm.pressed,
+.mobile-face-md.pressed,
+.mobile-face-lg.pressed {
+  border-color: var(--amber);
+  box-shadow: 0 0 16px rgba(255, 181, 71, 0.65);
+}
+
+/* Modo Paisagem no Celular: jogo no centro + controles nas laterais (estilo PSP/Switch) sem bloquear o centro! */
+@media (orientation: landscape) and (max-height: 540px) {
+  .mobile-player-shell {
+    display: grid;
+    grid-template-rows: auto 1fr;
+    grid-template-columns: 1fr;
+  }
+
+  .mobile-deck {
+    position: fixed;
+    inset: 38px 0 0 0;
+    background: transparent;
+    border-top: none;
+    pointer-events: none;
+    justify-content: space-between;
+    padding: 6px calc(10px + env(safe-area-inset-right, 0px)) 10px calc(10px + env(safe-area-inset-left, 0px));
+  }
+
+  .mobile-deck button,
+  .mobile-stick {
+    pointer-events: auto;
+    opacity: 0.84;
+  }
+
+  .mobile-deck-shoulders span {
+    display: none;
+  }
+
+  .mobile-deck-main {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-end;
+    flex: 1;
+  }
+
+  .mobile-zone-center {
+    flex-direction: row;
+    margin-bottom: 4px;
+  }
+}

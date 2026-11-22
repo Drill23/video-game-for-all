@@ -47,7 +47,7 @@ export class HttpRangeSource implements DiscSource {
   readonly name: string;
   readonly size: number;
   private readonly timeoutMs: number;
-  private readonly fetchImpl: typeof fetch;
+  private readonly customFetch: typeof fetch | null;
 
   private constructor(
     public readonly url: string,
@@ -55,44 +55,63 @@ export class HttpRangeSource implements DiscSource {
     name: string,
     id: string,
     timeoutMs: number,
-    fetchImpl: typeof fetch,
+    customFetch: typeof fetch | null,
   ) {
     this.size = size;
     this.name = name;
     this.id = id;
     this.timeoutMs = timeoutMs;
-    this.fetchImpl = fetchImpl;
+    this.customFetch = customFetch;
+  }
+
+  private doFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+    if (this.customFetch) {
+      const fn = this.customFetch;
+      return fn(input, init);
+    }
+    return globalThis.fetch(input, init);
   }
 
   static async open(url: string, options: HttpRangeOptions = {}): Promise<HttpRangeSource> {
-    const fetchImpl = options.fetchImpl ?? fetch;
+    const customFetch = options.fetchImpl ?? null;
     const timeoutMs = options.timeoutMs ?? 12_000;
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
 
     try {
-      const res = await fetchImpl(url, {
-        headers: { Range: 'bytes=0-0' },
-        cache: 'no-store',
-        signal: controller.signal,
-      });
+      const res = await (customFetch
+        ? customFetch(url, {
+            headers: { Range: 'bytes=0-0' },
+            cache: 'no-store',
+            signal: controller.signal,
+          })
+        : globalThis.fetch(url, {
+            headers: { Range: 'bytes=0-0' },
+            cache: 'no-store',
+            signal: controller.signal,
+          }));
 
       const total = res.status === 206 ? parseContentRangeTotal(res.headers.get('Content-Range')) : null;
       if (!total) {
         await res.body?.cancel().catch(() => {});
-        if (res.status === 200) {
+        if (res.status === 401 || res.status === 403) {
           throw new Error(
-            'O servidor não suporta HTTP Byte Ranges (retornou 200 em vez de 206). Não é possível fazer streaming sob demanda.',
+            'Este arquivo está bloqueado ou privado no servidor de origem. Escolha outra opção ou carregue sua ISO local.',
           );
         }
-        throw new Error(`Falha ao abrir disco remoto HTTP ${res.status} (${url})`);
+        if (res.status === 200) {
+          throw new Error(
+            'O servidor não suporta leitura por blocos (HTTP 206 Range). Baixe o arquivo no seu computador e carregue localmente.',
+          );
+        }
+        throw new Error(`Não foi possível abrir o disco remoto (HTTP ${res.status}).`);
       }
 
       await res.arrayBuffer().catch(() => null);
       const parsed = new URL(url, 'http://localhost');
       const fallbackName = decodeURIComponent(parsed.pathname.split('/').pop() || 'remote-disc.iso');
       const id = options.id ?? `http_${hashUrl(url)}_${total}`;
-      return new HttpRangeSource(url, total, options.name ?? fallbackName, id, timeoutMs, fetchImpl);
+      return new HttpRangeSource(url, total, options.name ?? fallbackName, id, timeoutMs, customFetch);
     } finally {
       clearTimeout(timer);
     }
@@ -111,7 +130,7 @@ export class HttpRangeSource implements DiscSource {
 
       let lastErr: Error | null = null;
       try {
-        const res = await this.fetchImpl(this.url, {
+        const res = await this.doFetch(this.url, {
           headers: { Range: `bytes=${offset}-${clampedEnd}` },
           cache: 'no-store',
           signal: controller.signal,

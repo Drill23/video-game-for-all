@@ -8,11 +8,8 @@ import {
   STORE_CATALOG,
   detectConsoleFromFilename,
   getUserSourceForGame,
-  importUserSourcesJson,
-  listArchiveFiles,
-  searchInternetArchive,
-  type ArchivePlayableFile,
-  type ArchiveSearchResult,
+  smartFindGameOptions,
+  type SmartFindOption,
   type StoreGame,
 } from '@vgfa/runtime';
 import {
@@ -30,14 +27,11 @@ import { PlayerView, type ActiveSession, type PlayerMode } from './pages/PlayerV
 
 function resolveMode(consoleId: ConsoleId): PlayerMode {
   const def = CONSOLE_MAP[consoleId];
-  if (def.engineTier === 'vgfa-ps2-webgpu') return 'ps2-webgpu-lab';
-  if (def.engineTier === 'emulatorjs-wasm') return 'emulatorjs-rom';
-  return 'libretro-rom';
+  return def.engineTier === 'vgfa-ps2-webgpu' ? 'ps2-webgpu-lab' : 'emulatorjs-rom';
 }
 
 function fmtSize(bytes: number): string {
-  if (!bytes) return '—';
-  if (bytes < 1024) return `${bytes} B`;
+  if (!bytes) return '';
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
   if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
   return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
@@ -57,25 +51,16 @@ export const App: React.FC = () => {
   const [user, setUser] = useState<UserProfile | null>(() => auth.getCurrentUser());
   const [selectedConsole, setSelectedConsole] = useState<ConsoleId | 'all'>('all');
   const [storeQuery, setStoreQuery] = useState('');
-  const [sortBy, setSortBy] = useState<'popular' | 'rating' | 'year'>('popular');
+  const [viewTab, setViewTab] = useState<'playable' | 'library'>('playable');
   const [detailGame, setDetailGame] = useState<StoreGame | null>(null);
   const [activeSession, setActiveSession] = useState<ActiveSession | null>(null);
   const [showAuth, setShowAuth] = useState(false);
   const [showSaves, setShowSaves] = useState(false);
 
-  // BYOD / Streaming remoto + Manifesto JSON de Fontes
-  const [remoteUrlInput, setRemoteUrlInput] = useState('');
-  const [remoteConsole, setRemoteConsole] = useState<ConsoleId>('ps2');
-  const [sourceImportStatus, setSourceImportStatus] = useState<string | null>(null);
-
-  // Pesquisa ao vivo no Internet Archive (CORS-Free)
-  const [archiveQuery, setArchiveQuery] = useState('');
-  const [searching, setSearching] = useState(false);
-  const [searchResults, setSearchResults] = useState<ArchiveSearchResult[]>([]);
-  const [searchError, setSearchError] = useState<string | null>(null);
-  const [expandedFiles, setExpandedFiles] = useState<
-    Record<string, { restricted: boolean; files: ArchivePlayableFile[] }>
-  >({});
+  // Busca inteligente livre na web (somente fontes abertas verificadas HTTP 200!)
+  const [webFinding, setWebFinding] = useState(false);
+  const [webOptions, setWebOptions] = useState<SmartFindOption[]>([]);
+  const [webNote, setWebNote] = useState<string | null>(null);
 
   const t = TRANSLATIONS[lang];
   const effectiveUserId = user?.id ?? 'guest';
@@ -93,6 +78,7 @@ export const App: React.FC = () => {
       title: game.title,
       consoleId: game.consoleId,
       serial: game.serial,
+      coverUrl: game.coverUrl,
       mode: resolveMode(game.consoleId),
       localFile: file,
       romFilename: file.name,
@@ -107,6 +93,7 @@ export const App: React.FC = () => {
       title: game.title,
       consoleId: game.consoleId,
       serial: game.serial,
+      coverUrl: game.coverUrl,
       mode: resolveMode(game.consoleId),
       remoteUrl: url,
       romFilename: filename,
@@ -121,6 +108,7 @@ export const App: React.FC = () => {
       title: game.title,
       consoleId: 'ps2',
       serial: game.serial,
+      coverUrl: game.coverUrl,
       mode: 'ps2-webgpu-lab',
     });
   };
@@ -141,62 +129,23 @@ export const App: React.FC = () => {
     });
   };
 
-  const handleMountRemoteUrl = () => {
-    const url = remoteUrlInput.trim();
-    if (!url) return;
-    const filename = decodeURIComponent(url.split('/').pop()?.split('?')[0] || 'remote-game');
-    setActiveSession({
-      id: `stream-${Date.now()}`,
-      title: filename,
-      consoleId: remoteConsole,
-      mode: resolveMode(remoteConsole),
-      remoteUrl: url,
-      romFilename: filename,
-    });
-  };
-
-  const handleImportSourcesJson = async (file: File) => {
+  const runSmartWebSearch = async (term?: string) => {
+    const q = (term ?? storeQuery).trim();
+    if (!q) return;
+    setWebFinding(true);
+    setWebNote(null);
     try {
-      const text = await file.text();
-      const count = importUserSourcesJson(text);
-      setSourceImportStatus(`✓ ${count} fonte(s) vinculadas com sucesso na sua biblioteca!`);
-    } catch {
-      setSourceImportStatus('JSON inválido. Use o formato {"ps2-dbz-bt3": "https://..."}');
-    }
-  };
-
-  const handleArchiveSearch = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!archiveQuery.trim()) return;
-    setSearching(true);
-    setSearchError(null);
-    try {
-      const results = await searchInternetArchive(
-        archiveQuery,
+      const res = await smartFindGameOptions(
+        q,
         selectedConsole === 'all' ? undefined : selectedConsole,
-        10,
       );
-      setSearchResults(results);
-      if (results.length === 0) {
-        setSearchError('Nenhum item público encontrado com esse termo.');
-      }
-    } catch (err) {
-      setSearchError(err instanceof Error ? err.message : 'Erro ao pesquisar no Internet Archive.');
+      setWebOptions(res.options);
+      setWebNote(res.note ?? null);
     } finally {
-      setSearching(false);
+      setWebFinding(false);
     }
   };
 
-  const inspectArchiveItem = async (item: ArchiveSearchResult) => {
-    try {
-      const data = await listArchiveFiles(item.identifier);
-      setExpandedFiles((prev) => ({ ...prev, [item.identifier]: data }));
-    } catch (err) {
-      setSearchError(err instanceof Error ? err.message : 'Falha ao ler arquivos do item.');
-    }
-  };
-
-  // Filtragem e ordenação da Loja
   const normalizedQuery = storeQuery.trim().toLowerCase();
 
   const matchesFilter = (g: StoreGame) => {
@@ -213,24 +162,8 @@ export const App: React.FC = () => {
     );
   };
 
-  const filteredFreeGames = FREE_PLAYABLE_ROMS.filter(matchesFilter);
-
-  const filteredStoreGames = useMemo(() => {
-    const list = STORE_CATALOG.filter(matchesFilter);
-    return [...list].sort((a, b) => {
-      if (sortBy === 'rating') return b.rating - a.rating;
-      if (sortBy === 'year') return b.year - a.year;
-      return (a.featuredRank ?? 999) - (b.featuredRank ?? 999) || b.rating - a.rating;
-    });
-  }, [selectedConsole, normalizedQuery, sortBy]);
-
-  const topFeatured = useMemo(
-    () =>
-      STORE_CATALOG.filter((g) => g.featuredRank !== undefined)
-        .sort((a, b) => (a.featuredRank ?? 99) - (b.featuredRank ?? 99))
-        .slice(0, 8),
-    [],
-  );
+  const filteredPlayable = FREE_PLAYABLE_ROMS.filter(matchesFilter);
+  const filteredLibrary = STORE_CATALOG.filter(matchesFilter);
 
   return (
     <>
@@ -245,25 +178,23 @@ export const App: React.FC = () => {
           </div>
 
           <div className="vgfa-nav-actions">
-            <button
-              className="btn btn-sm btn-ghost"
-              onClick={() =>
-                setActiveSession({
-                  id: 'dualshock2-tester',
-                  title: 'Teste DualShock 2 (Analógicos + Pressão + Vibração)',
-                  consoleId: 'ps2',
-                  mode: 'builtin-arcade',
-                  builtinVariant: 'neon-arena',
-                })
-              }
-            >
-              🎮 Testar DualShock 2
-            </button>
+            <label className="btn btn-sm btn-primary" style={{ cursor: 'pointer' }}>
+              📂 Abrir Meu Jogo
+              <input
+                type="file"
+                accept=".a26,.nes,.sfc,.smc,.md,.gen,.gb,.gbc,.gba,.z64,.n64,.v64,.cue,.chd,.cso,.zso,.iso,.bin,.pbp,.elf"
+                style={{ display: 'none' }}
+                onChange={(e) => {
+                  const f = e.target.files?.[0];
+                  if (f) handleLocalFilePick(f);
+                }}
+              />
+            </label>
             <a className="btn btn-sm btn-cyan" href="/pad" target="_blank" rel="noreferrer">
               📱 {t.phonePadMode}
             </a>
             <button className="btn btn-sm btn-ghost" onClick={() => setShowSaves(true)}>
-              💾 {t.saves}
+              💾 Saves
             </button>
             <select
               className="lang-select"
@@ -278,14 +209,7 @@ export const App: React.FC = () => {
 
             {user ? (
               <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                <span
-                  className="badge"
-                  style={{
-                    background: 'var(--bg-2)',
-                    borderColor: user.avatarColor,
-                    color: 'var(--text-0)',
-                  }}
-                >
+                <span className="badge" style={{ borderColor: user.avatarColor }}>
                   ● {user.username}
                 </span>
                 <button
@@ -299,7 +223,7 @@ export const App: React.FC = () => {
                 </button>
               </div>
             ) : (
-              <button className="btn btn-sm btn-primary" onClick={() => setShowAuth(true)}>
+              <button className="btn btn-sm btn-ghost" onClick={() => setShowAuth(true)}>
                 {t.signIn}
               </button>
             )}
@@ -317,30 +241,127 @@ export const App: React.FC = () => {
         />
       ) : (
         <main className="vgfa-shell">
-          {/* Hero + Busca Instantânea na Loja */}
-          <section className="hero">
-            <div>
-              <div className="hero-kicker">{t.heroKicker}</div>
-              <h1>{t.heroTitle}</h1>
-              <p>{t.heroDesc}</p>
+          {/* Hero Simples e Direto */}
+          <section className="hero" style={{ gridTemplateColumns: '1fr', gap: 18 }}>
+            <div style={{ maxWidth: 820 }}>
+              <div className="hero-kicker">🎮 Atari 2600 ao PlayStation 2 • Celular = Controle via QR Code</div>
+              <h1 style={{ fontSize: 'clamp(24px, 3vw, 36px)' }}>
+                Escolha o jogo, escaneie o QR Code no celular e comece a jogar.
+              </h1>
 
-              <div className="input-row" style={{ marginBottom: 14 }}>
+              {/* Barra de Busca Universal */}
+              <form
+                className="input-row"
+                style={{ marginTop: 14, marginBottom: 14 }}
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  void runSmartWebSearch();
+                }}
+              >
                 <input
                   className="field"
-                  placeholder="Buscar na loja: Dragon Ball Z, GTA San Andreas, Mario, Sonic, PS2, SLUS-21678..."
+                  style={{ fontSize: 15, padding: '13px 16px' }}
+                  placeholder="Qual jogo você quer jogar? Ex.: Super Boss, Dragon Ball, GTA, Mario, Sonic..."
                   value={storeQuery}
-                  onChange={(e) => setStoreQuery(e.target.value)}
+                  onChange={(e) => {
+                    setStoreQuery(e.target.value);
+                    if (e.target.value.trim()) setViewTab('library');
+                  }}
                 />
+                <button className="btn btn-primary" type="submit" disabled={webFinding || !storeQuery.trim()}>
+                  {webFinding ? 'Buscando...' : '🔍 Buscar na Internet'}
+                </button>
                 {storeQuery && (
-                  <button className="btn btn-ghost" onClick={() => setStoreQuery('')}>
+                  <button
+                    type="button"
+                    className="btn btn-ghost"
+                    onClick={() => {
+                      setStoreQuery('');
+                      setWebOptions([]);
+                      setWebNote(null);
+                    }}
+                  >
                     Limpar
                   </button>
                 )}
-              </div>
+              </form>
 
+              {/* Resultados Abertos Verificados da Busca Livre */}
+              {(webOptions.length > 0 || webNote) && (
+                <div className="panel" style={{ background: 'var(--bg-0)', marginBottom: 14 }}>
+                  <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 8 }}>
+                    Resultados Abertos Verificados para &ldquo;{storeQuery}&rdquo;
+                  </div>
+                  {webOptions.length > 0 ? (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                      {webOptions.slice(0, 4).map((opt) => (
+                        <div
+                          key={`${opt.identifier}-${opt.filename}`}
+                          style={{
+                            padding: '10px 12px',
+                            borderRadius: 10,
+                            background: 'var(--bg-1)',
+                            border: opt.bestChoice ? '1px solid var(--amber)' : '1px solid var(--border)',
+                            display: 'flex',
+                            justifyContent: 'space-between',
+                            alignItems: 'center',
+                            gap: 10,
+                            flexWrap: 'wrap',
+                          }}
+                        >
+                          <div>
+                            <div style={{ fontSize: 13, fontWeight: 700 }}>
+                              {opt.bestChoice ? '⭐ Melhor Opção • ' : ''}
+                              {opt.filename}
+                            </div>
+                            <div style={{ fontSize: 11, color: 'var(--text-2)' }}>
+                              {opt.itemTitle} • {fmtSize(opt.size)}
+                            </div>
+                          </div>
+                          <button
+                            className="btn btn-sm btn-primary"
+                            onClick={() => {
+                              const cid = detectConsoleFromFilename(
+                                opt.filename,
+                                selectedConsole === 'all' ? 'snes' : selectedConsole,
+                              );
+                              setActiveSession({
+                                id: `web-${opt.identifier}`,
+                                title: opt.itemTitle,
+                                consoleId: cid,
+                                mode: resolveMode(cid),
+                                remoteUrl: opt.proxyUrl,
+                                romFilename: opt.filename,
+                              });
+                            }}
+                          >
+                            ▶ Jogar Agora
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div style={{ fontSize: 13, color: 'var(--text-2)' }}>{webNote}</div>
+                  )}
+                </div>
+              )}
+
+              {/* Abas Principais Ultra-Claras */}
               <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
                 <button
-                  className="btn btn-primary"
+                  className={`btn ${viewTab === 'playable' ? 'btn-primary' : 'btn-ghost'}`}
+                  onClick={() => setViewTab('playable')}
+                >
+                  ⚡ Prontos para Jogar Agora ({FREE_PLAYABLE_ROMS.length} Jogos 1-Clique)
+                </button>
+                <button
+                  className={`btn ${viewTab === 'library' ? 'btn-primary' : 'btn-ghost'}`}
+                  onClick={() => setViewTab('library')}
+                >
+                  🏆 Clássicos &amp; Minha Biblioteca ({STORE_CATALOG.length} Títulos)
+                </button>
+                <button
+                  className="btn btn-cyan"
                   onClick={() =>
                     launchStoreUrl(
                       FREE_PLAYABLE_ROMS[0],
@@ -349,139 +370,56 @@ export const App: React.FC = () => {
                     )
                   }
                 >
-                  ▶ Jogar SNES Real Agora (1 Clique)
+                  ▶ Testar SNES 60 FPS Agora
                 </button>
-                <button
-                  className="btn btn-cyan"
-                  onClick={() => setDetailGame(STORE_CATALOG[0])}
-                >
-                  🐉 Abrir Dragon Ball Z: BT3 (PS2)
-                </button>
-              </div>
-            </div>
-
-            <div className="hero-pills">
-              <div className="stat-card">
-                <strong>Loja com {ALL_STORE_GAMES.length} Títulos</strong>
-                <span>Capas reais do Atari 2600 ao PlayStation 2 com sinopse, notas e serial</span>
-              </div>
-              <div className="stat-card">
-                <strong>Emuladores Reais WASM</strong>
-                <span>Snes9x, FCEUmm, mGBA, Genesis, Stella, Mupen64, PCSX, PPSSPP e PS2 WebGPU</span>
-              </div>
-              <div className="stat-card">
-                <strong>Celular = Controle QR</strong>
-                <span>Adapta automaticamente de Atari CX40 até PS2 DualShock 2 + Bluetooth</span>
-              </div>
-              <div className="stat-card">
-                <strong>Proxy CORS-Free + OPFS</strong>
-                <span>Streaming sob demanda sem erro de CORS e saves em IndexedDB (.ps2 / state)</span>
               </div>
             </div>
           </section>
 
-          {/* Barra de Consoles + Ordenação */}
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
-            <div className="console-strip" style={{ flex: 1 }}>
-              <button
-                className={`console-chip ${selectedConsole === 'all' ? 'active' : ''}`}
-                onClick={() => setSelectedConsole('all')}
-              >
-                {t.allConsoles} ({ALL_STORE_GAMES.length})
-              </button>
-              {CONSOLES.map((c) => (
-                <button
-                  key={c.id}
-                  className={`console-chip ${selectedConsole === c.id ? 'active' : ''}`}
-                  onClick={() => setSelectedConsole(c.id)}
-                >
-                  <span className="dot" style={{ background: c.accent }} />
-                  {c.shortName}
-                </button>
-              ))}
-            </div>
-
-            <select
-              className="lang-select"
-              value={sortBy}
-              onChange={(e) => setSortBy(e.target.value as 'popular' | 'rating' | 'year')}
+          {/* Filtro por Console */}
+          <div className="console-strip">
+            <button
+              className={`console-chip ${selectedConsole === 'all' ? 'active' : ''}`}
+              onClick={() => setSelectedConsole('all')}
             >
-              <option value="popular">Ordenar: Mais Jogados</option>
-              <option value="rating">Ordenar: Maior Nota ★</option>
-              <option value="year">Ordenar: Mais Recentes</option>
-            </select>
+              Todos ({ALL_STORE_GAMES.length})
+            </button>
+            {CONSOLES.map((c) => (
+              <button
+                key={c.id}
+                className={`console-chip ${selectedConsole === c.id ? 'active' : ''}`}
+                onClick={() => setSelectedConsole(c.id)}
+              >
+                <span className="dot" style={{ background: c.accent }} />
+                {c.shortName}
+              </button>
+            ))}
           </div>
 
-          {/* Seção 1: Top Mais Jogados (quando sem filtro/busca) */}
-          {selectedConsole === 'all' && !normalizedQuery && (
+          {/* ABA 1: 100% JOGÁVEIS AGORA EM 1 CLIQUE (SEM CADEADO!) */}
+          {(viewTab === 'playable' || normalizedQuery) && filteredPlayable.length > 0 && (
             <>
               <div className="section-head">
-                <h2>🔥 Top Mais Jogados — Destaques PlayStation 2 &amp; Clássicos</h2>
-                <p>Clique em qualquer título para ver ficha completa, sinopse, serial e carregar/rodar no navegador</p>
+                <h2>⚡ Prontos para Jogar Agora (1 Clique • Sem Cadeado • 60 FPS)</h2>
+                <p>Jogos reais completos de SNES, NES, GBA, Mega Drive e Atari — clique, conecte seu celular/Bluetooth e jogue!</p>
               </div>
               <div className="store-grid">
-                {topFeatured.map((game) => {
-                  const def = CONSOLE_MAP[game.consoleId];
-                  const hasCustomSource = Boolean(getUserSourceForGame(game.id));
-                  return (
-                    <article
-                      key={`top-${game.id}`}
-                      className="store-card"
-                      onClick={() => setDetailGame(game)}
-                    >
-                      <div className="store-art-wrap">
-                        <img className="store-art-img" src={game.coverUrl} alt={game.title} loading="lazy" />
-                        <div className="store-art-overlay" />
-                        <div className="store-badges-top">
-                          <span
-                            className="badge"
-                            style={{ background: def.accent, color: '#07080d', borderColor: 'transparent' }}
-                          >
-                            #{game.featuredRank} • {def.shortName}
-                          </span>
-                          <span className="rating-pill">★ {game.rating.toFixed(1)}</span>
-                        </div>
-                      </div>
-                      <div className="store-card-body">
-                        <h3 className="store-card-title">{game.title}</h3>
-                        <div className="store-card-meta">
-                          {game.year} • {game.genre}
-                        </div>
-                        <div className="store-card-foot">
-                          <span className="mono" style={{ fontSize: 11, color: 'var(--text-2)' }}>
-                            {game.serial || game.sizeEstimate}
-                          </span>
-                          <span className="badge" style={{ color: hasCustomSource ? '#34d399' : '#bae6fd' }}>
-                            {hasCustomSource ? '✓ Fonte Pronta' : 'Ver / Jogar'}
-                          </span>
-                        </div>
-                      </div>
-                    </article>
-                  );
-                })}
-              </div>
-            </>
-          )}
-
-          {/* Seção 2: Jogáveis em 1 Clique — ROMs Reais em Emuladores WASM */}
-          {filteredFreeGames.length > 0 && (
-            <>
-              <div className="section-head">
-                <h2>⚡ Jogar Agora em 1 Clique — ROMs Reais (Emuladores WASM Grátis &amp; Open-Source)</h2>
-                <p>Cartuchos reais de SNES, NES, GBA, Mega Drive e Atari 2600 rodando nos cores Snes9x, FCEUmm, mGBA, Genesis e Stella</p>
-              </div>
-
-              <div className="store-grid">
-                {filteredFreeGames.map((game) => {
+                {filteredPlayable.map((game) => {
                   const def = CONSOLE_MAP[game.consoleId];
                   return (
                     <article
                       key={game.id}
                       className="store-card"
-                      onClick={() => setDetailGame(game)}
+                      onClick={() => launchStoreUrl(game, game.freeRomUrl!, game.freeRomFilename)}
                     >
                       <div className="store-art-wrap landscape">
-                        <img className="store-art-img" src={game.coverUrl} alt={game.title} loading="lazy" />
+                        <img
+                          className="store-art-img"
+                          src={game.coverUrl}
+                          alt={game.title}
+                          crossOrigin="anonymous"
+                          loading="lazy"
+                        />
                         <div className="store-art-overlay" />
                         <div className="store-badges-top">
                           <span
@@ -490,8 +428,8 @@ export const App: React.FC = () => {
                           >
                             {def.shortName}
                           </span>
-                          <span className="badge" style={{ background: 'rgba(16, 185, 129, 0.9)', color: '#042f2e' }}>
-                            1-Clique Grátis
+                          <span className="badge" style={{ background: '#10b981', color: '#042f2e', borderColor: 'transparent' }}>
+                            ✓ Pronto
                           </span>
                         </div>
                       </div>
@@ -509,7 +447,7 @@ export const App: React.FC = () => {
                               launchStoreUrl(game, game.freeRomUrl!, game.freeRomFilename);
                             }}
                           >
-                            ▶ Baixar &amp; Jogar ({def.libretroCore || def.emulatorJsSystem})
+                            ▶ Jogar Agora
                           </button>
                         </div>
                       </div>
@@ -520,260 +458,60 @@ export const App: React.FC = () => {
             </>
           )}
 
-          {/* Seção 3: Loja Completa */}
-          <div className="section-head">
-            <h2>
-              🎮 Catálogo da Loja ({filteredStoreGames.length}{' '}
-              {selectedConsole === 'all' ? 'Clássicos Reais' : CONSOLE_MAP[selectedConsole].name})
-            </h2>
-            <p>Clique em qualquer jogo para ver informações completas, pesquisar no acervo ou carregar sua ROM/ISO</p>
-          </div>
-
-          {filteredStoreGames.length === 0 ? (
-            <div className="panel" style={{ textAlign: 'center', color: 'var(--text-2)', padding: 32 }}>
-              Nenhum título encontrado para &ldquo;{storeQuery}&rdquo; neste filtro. Tente limpar a busca ou usar a pesquisa ao vivo no Internet Archive abaixo.
-            </div>
-          ) : (
-            <div className="store-grid">
-              {filteredStoreGames.map((game) => {
-                const def = CONSOLE_MAP[game.consoleId];
-                const hasCustomSource = Boolean(getUserSourceForGame(game.id));
-                return (
-                  <article
-                    key={game.id}
-                    className="store-card"
-                    onClick={() => setDetailGame(game)}
-                  >
-                    <div className="store-art-wrap">
-                      <img className="store-art-img" src={game.coverUrl} alt={game.title} loading="lazy" />
-                      <div className="store-art-overlay" />
-                      <div className="store-badges-top">
-                        <span
-                          className="badge"
-                          style={{ background: def.accent, color: '#07080d', borderColor: 'transparent' }}
-                        >
-                          {def.shortName}
-                        </span>
-                        <span className="rating-pill">★ {game.rating.toFixed(1)}</span>
-                      </div>
-                    </div>
-                    <div className="store-card-body">
-                      <h3 className="store-card-title">{game.title}</h3>
-                      <div className="store-card-meta">
-                        {game.developer} • {game.year}
-                      </div>
-                      <div className="store-card-foot">
-                        <span style={{ fontSize: 11, color: 'var(--text-2)' }}>{game.sizeEstimate}</span>
-                        <span className="badge" style={{ color: hasCustomSource ? '#34d399' : '#f8fafc' }}>
-                          {hasCustomSource ? '▶ Jogar' : 'Detalhes'}
-                        </span>
-                      </div>
-                    </div>
-                  </article>
-                );
-              })}
-            </div>
-          )}
-
-          {/* Seção 4: Carregar Local / Fontes JSON / Busca Geral no Internet Archive */}
-          <div className="split-grid">
-            <section className="panel">
-              <h2 style={{ margin: '0 0 6px', fontSize: 17 }}>{t.byodTitle}</h2>
-              <p style={{ margin: '0 0 14px', fontSize: 13, color: 'var(--text-2)', lineHeight: 1.45 }}>
-                {t.byodSub}
-              </p>
-
-              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 14 }}>
-                <label className="btn btn-cyan" style={{ flex: 1, padding: '12px', cursor: 'pointer' }}>
-                  📂 {t.dropRomLabel}
-                  <input
-                    type="file"
-                    accept=".a26,.nes,.sfc,.smc,.md,.gen,.gb,.gbc,.gba,.z64,.n64,.v64,.cue,.chd,.cso,.zso,.iso,.bin,.pbp,.elf"
-                    style={{ display: 'none' }}
-                    onChange={(e) => {
-                      const file = e.target.files?.[0];
-                      if (file) handleLocalFilePick(file);
-                    }}
-                  />
-                </label>
-
-                <label className="btn btn-ghost" style={{ padding: '12px', cursor: 'pointer' }}>
-                  📋 Importar Fontes (.json)
-                  <input
-                    type="file"
-                    accept=".json"
-                    style={{ display: 'none' }}
-                    onChange={(e) => {
-                      const file = e.target.files?.[0];
-                      if (file) void handleImportSourcesJson(file);
-                    }}
-                  />
-                </label>
+          {/* ABA 2: CLÁSSICOS & MINHA BIBLIOTECA (TOP PS2 → ATARI) */}
+          {(viewTab === 'library' || normalizedQuery) && (
+            <>
+              <div className="section-head">
+                <h2>🏆 Top Clássicos &amp; Minha Biblioteca ({filteredLibrary.length} Títulos)</h2>
+                <p>Clique em qualquer clássico para usar sua ROM/ISO local, vincular sua fonte ou buscar cópias abertas verificadas</p>
               </div>
-
-              {sourceImportStatus && (
-                <div style={{ fontSize: 12, color: '#34d399', marginBottom: 10 }}>{sourceImportStatus}</div>
-              )}
-
-              <div className="input-row">
-                <select
-                  className="lang-select"
-                  value={remoteConsole}
-                  onChange={(e) => setRemoteConsole(e.target.value as ConsoleId)}
-                >
-                  {CONSOLES.map((c) => (
-                    <option key={c.id} value={c.id}>
-                      {c.shortName}
-                    </option>
-                  ))}
-                </select>
-                <input
-                  className="field"
-                  placeholder={t.streamUrlPlaceholder}
-                  value={remoteUrlInput}
-                  onChange={(e) => setRemoteUrlInput(e.target.value)}
-                />
-                <button className="btn btn-primary" onClick={handleMountRemoteUrl}>
-                  {t.mountStreamBtn}
-                </button>
-              </div>
-            </section>
-
-            <section className="panel">
-              <h2 style={{ margin: '0 0 6px', fontSize: 17 }}>{t.archiveTitle}</h2>
-              <p style={{ margin: '0 0 14px', fontSize: 13, color: 'var(--text-2)', lineHeight: 1.45 }}>
-                Busca via proxy CORS-Free local — identifica automaticamente arquivos diretos jogáveis vs compactados (.zip/.7z) ou bloqueados.
-              </p>
-
-              <form className="input-row" onSubmit={(e) => void handleArchiveSearch(e)}>
-                <input
-                  className="field"
-                  placeholder="Ex.: homebrew nes, snes, gba, dragon ball, atari..."
-                  value={archiveQuery}
-                  onChange={(e) => setArchiveQuery(e.target.value)}
-                />
-                <button className="btn btn-primary" type="submit" disabled={searching}>
-                  {searching ? 'Buscando...' : t.searchBtn}
-                </button>
-              </form>
-
-              {searchError && (
-                <div style={{ marginTop: 10, color: '#fbbf24', fontSize: 12 }}>{searchError}</div>
-              )}
-
-              {searchResults.length > 0 && (
-                <div style={{ marginTop: 14, display: 'flex', flexDirection: 'column', gap: 8, maxHeight: 300, overflowY: 'auto' }}>
-                  {searchResults.map((item) => {
-                    const inspected = expandedFiles[item.identifier];
-                    return (
-                      <div
-                        key={item.identifier}
-                        style={{
-                          padding: '10px 12px',
-                          borderRadius: 10,
-                          background: 'var(--bg-0)',
-                          border: '1px solid var(--border)',
-                          fontSize: 12,
-                        }}
-                      >
-                        <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, alignItems: 'center' }}>
-                          <div>
-                            <strong>{item.title}</strong>
-                            <div style={{ color: 'var(--text-2)', fontSize: 11 }}>
-                              {item.collection} {item.year ? `• ${item.year}` : ''}
-                            </div>
-                          </div>
-                          <div style={{ display: 'flex', gap: 6 }}>
-                            <button
-                              className="btn btn-sm btn-cyan"
-                              onClick={() => void inspectArchiveItem(item)}
-                            >
-                              Ver Arquivos
-                            </button>
-                            <a
-                              className="btn btn-sm btn-ghost"
-                              href={item.detailsUrl}
-                              target="_blank"
-                              rel="noreferrer"
-                            >
-                              ↗
-                            </a>
-                          </div>
+              <div className="store-grid">
+                {filteredLibrary.map((game) => {
+                  const def = CONSOLE_MAP[game.consoleId];
+                  const hasCustomSource = Boolean(getUserSourceForGame(game.id));
+                  return (
+                    <article
+                      key={game.id}
+                      className="store-card"
+                      onClick={() => setDetailGame(game)}
+                    >
+                      <div className="store-art-wrap">
+                        <img
+                          className="store-art-img"
+                          src={game.coverUrl}
+                          alt={game.title}
+                          crossOrigin="anonymous"
+                          loading="lazy"
+                        />
+                        <div className="store-art-overlay" />
+                        <div className="store-badges-top">
+                          <span
+                            className="badge"
+                            style={{ background: def.accent, color: '#07080d', borderColor: 'transparent' }}
+                          >
+                            {def.shortName}
+                          </span>
+                          <span className="rating-pill">★ {game.rating.toFixed(1)}</span>
                         </div>
-
-                        {inspected && (
-                          <div style={{ marginTop: 8, display: 'flex', flexDirection: 'column', gap: 6 }}>
-                            {inspected.files.length === 0 ? (
-                              <span style={{ color: 'var(--text-2)' }}>Nenhuma ROM/ISO encontrada neste item.</span>
-                            ) : (
-                              inspected.files.slice(0, 5).map((f) => (
-                                <div
-                                  key={f.name}
-                                  style={{
-                                    padding: '6px 8px',
-                                    borderRadius: 8,
-                                    background: 'var(--bg-1)',
-                                    display: 'flex',
-                                    justifyContent: 'space-between',
-                                    alignItems: 'center',
-                                    gap: 8,
-                                    flexWrap: 'wrap',
-                                  }}
-                                >
-                                  <div>
-                                    <span className="mono" style={{ fontSize: 11 }}>
-                                      {f.name} ({fmtSize(f.size)})
-                                    </span>
-                                    {f.warning && (
-                                      <div style={{ fontSize: 11, color: '#fbbf24' }}>⚠ {f.warning}</div>
-                                    )}
-                                  </div>
-                                  {f.playableDirectly ? (
-                                    <button
-                                      className="btn btn-sm btn-primary"
-                                      onClick={() => {
-                                        const cid = detectConsoleFromFilename(
-                                          f.name,
-                                          selectedConsole === 'all' ? item.consoleHint : selectedConsole,
-                                        );
-                                        setActiveSession({
-                                          id: `ia-${item.identifier}`,
-                                          title: `${item.title} (${f.name})`,
-                                          consoleId: cid,
-                                          mode: resolveMode(cid),
-                                          remoteUrl: f.proxyUrl,
-                                          romFilename: f.name,
-                                        });
-                                      }}
-                                    >
-                                      ▶ Rodar Agora
-                                    </button>
-                                  ) : !f.isPrivate ? (
-                                    <a
-                                      className="btn btn-sm btn-ghost"
-                                      href={f.url}
-                                      target="_blank"
-                                      rel="noreferrer"
-                                    >
-                                      ⬇ Baixar
-                                    </a>
-                                  ) : (
-                                    <span className="badge" style={{ color: '#fb7185' }}>
-                                      🔒 Privado
-                                    </span>
-                                  )}
-                                </div>
-                              ))
-                            )}
-                          </div>
-                        )}
                       </div>
-                    );
-                  })}
-                </div>
-              )}
-            </section>
-          </div>
+                      <div className="store-card-body">
+                        <h3 className="store-card-title">{game.title}</h3>
+                        <div className="store-card-meta">
+                          {game.developer} • {game.year}
+                        </div>
+                        <div className="store-card-foot">
+                          <span style={{ fontSize: 11, color: 'var(--text-2)' }}>{game.sizeEstimate}</span>
+                          <span className="badge" style={{ color: hasCustomSource ? '#34d399' : '#bae6fd' }}>
+                            {hasCustomSource ? '▶ Jogar' : 'Abrir'}
+                          </span>
+                        </div>
+                      </div>
+                    </article>
+                  );
+                })}
+              </div>
+            </>
+          )}
 
           <footer className="vgfa-footer">
             <span>{t.footerCredit}</span>

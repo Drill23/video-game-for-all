@@ -25,6 +25,33 @@ interface Room {
 
 const PLAYABLE_DIRECT_EXT = /\.(a26|nes|fds|sfc|smc|md|gen|smd|gb|gbc|gba|z64|n64|v64|iso|chd|cso|zso|bin|cue|pbp|elf)$/i;
 const ARCHIVE_COMPRESSED_EXT = /\.(zip|7z|rar)$/i;
+const JUNK_FILE_PATTERN = /(preview|image|imgs|boxart|cover|thumb|manual|artwork|onion|garlic|theme|soundtrack|ost|video|movie|screenshot|readme|changelog)/i;
+
+const CONSOLE_EXT_REGEX: Record<string, RegExp> = {
+  atari2600: /\.(a26|bin)$/i,
+  nes: /\.(nes|fds)$/i,
+  snes: /\.(sfc|smc)$/i,
+  megadrive: /\.(md|gen|smd|bin)$/i,
+  gba: /\.(gba|gb|gbc)$/i,
+  n64: /\.(z64|n64|v64)$/i,
+  ps1: /\.(chd|cue|bin|pbp|iso)$/i,
+  psp: /\.(iso|cso|pbp)$/i,
+  ps2: /\.(iso|chd|cso|zso|bin|elf)$/i,
+};
+
+async function verifyUrlReachable(url: string): Promise<boolean> {
+  try {
+    const res = await fetch(url, {
+      method: 'HEAD',
+      headers: { 'User-Agent': 'VGFA-Probe/0.3' },
+      redirect: 'follow',
+      signal: AbortSignal.timeout(3_000),
+    });
+    return res.status === 200 || res.status === 206;
+  } catch {
+    return false;
+  }
+}
 
 function isAllowedProxyTarget(rawUrl: string): URL | null {
   try {
@@ -133,7 +160,8 @@ async function handleArchiveSearch(res: http.ServerResponse, urlObj: URL): Promi
   }
 
   const sanitized = q.replace(/[()"]/g, ' ');
-  const query = `(${sanitized}) AND mediatype:software`;
+  // Filtra itens bloqueados/restritos já na consulta do Internet Archive!
+  const query = `(${sanitized}) AND mediatype:software AND NOT access-restricted-item:true`;
   const params = new URLSearchParams({
     q: query,
     'fl[]': 'identifier,title,creator,year,collection,downloads',
@@ -221,32 +249,37 @@ async function handleArchiveFiles(res: http.ServerResponse, urlObj: URL): Promis
 
     const itemRestricted = String(data.metadata?.access_restricted_item || '').toLowerCase() === 'true';
 
-    const files = (data.files ?? [])
-      .filter((f) => PLAYABLE_DIRECT_EXT.test(f.name) || ARCHIVE_COMPRESSED_EXT.test(f.name))
-      .map((f) => {
-        const size = Number(f.size ?? 0);
-        const isPrivate = f.private === true || f.private === 'true' || itemRestricted;
-        const isCompressed = ARCHIVE_COMPRESSED_EXT.test(f.name);
-        const isDirect = PLAYABLE_DIRECT_EXT.test(f.name);
-        const tooLargeZip = isCompressed && size > 64 * 1024 * 1024;
-        const rawUrl = `https://archive.org/download/${encodeURIComponent(id)}/${encodeURIComponent(f.name)}`;
+    // Nunca retorna arquivos privados/bloqueados nem pacotes de imagens/manuais!
+    const files = itemRestricted
+      ? []
+      : (data.files ?? [])
+          .filter((f) => {
+            const isPriv = f.private === true || f.private === 'true';
+            if (isPriv) return false;
+            if (JUNK_FILE_PATTERN.test(f.name)) return false;
+            return PLAYABLE_DIRECT_EXT.test(f.name) || ARCHIVE_COMPRESSED_EXT.test(f.name);
+          })
+          .map((f) => {
+            const size = Number(f.size ?? 0);
+            const isCompressed = ARCHIVE_COMPRESSED_EXT.test(f.name);
+            const isDirect = PLAYABLE_DIRECT_EXT.test(f.name);
+            const tooLargeZip = isCompressed && size > 64 * 1024 * 1024;
+            const rawUrl = `https://archive.org/download/${encodeURIComponent(id)}/${encodeURIComponent(f.name)}`;
 
-        return {
-          name: f.name,
-          size,
-          url: rawUrl,
-          proxyUrl: `/api/proxy/stream?url=${encodeURIComponent(rawUrl)}`,
-          isPrivate,
-          isCompressed,
-          playableDirectly: isDirect && !isPrivate,
-          warning: isPrivate
-            ? 'Arquivo bloqueado/privado no Internet Archive (exige login na origem).'
-            : tooLargeZip
-              ? 'Arquivo compactado grande (.zip/.7z): baixe no computador, extraia a .iso e carregue no VGFA.'
-              : undefined,
-        };
-      })
-      .sort((a, b) => Number(b.playableDirectly) - Number(a.playableDirectly) || a.size - b.size);
+            return {
+              name: f.name,
+              size,
+              url: rawUrl,
+              proxyUrl: `/api/proxy/stream?url=${encodeURIComponent(rawUrl)}`,
+              isPrivate: false,
+              isCompressed,
+              playableDirectly: isDirect,
+              warning: tooLargeZip
+                ? 'Arquivo compactado grande (.zip/.7z): baixe, extraia a ROM/ISO e carregue localmente.'
+                : undefined,
+            };
+          })
+          .sort((a, b) => Number(b.playableDirectly) - Number(a.playableDirectly) || a.size - b.size);
 
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ id, restricted: itemRestricted, files }));
@@ -255,6 +288,156 @@ async function handleArchiveFiles(res: http.ServerResponse, urlObj: URL): Promis
     res.end(
       JSON.stringify({
         error: `Erro ao consultar arquivos do item: ${err instanceof Error ? err.message : String(err)}`,
+      }),
+    );
+  }
+}
+
+async function handleArchiveSmartFind(res: http.ServerResponse, urlObj: URL): Promise<void> {
+  const q = (urlObj.searchParams.get('q') || '').trim();
+  const consoleId = (urlObj.searchParams.get('console') || '').trim().toLowerCase();
+  const preferredExt = CONSOLE_EXT_REGEX[consoleId] ?? PLAYABLE_DIRECT_EXT;
+
+  if (!q) {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ options: [] }));
+    return;
+  }
+
+  const sanitized = q.replace(/[()"]/g, ' ');
+  const params = new URLSearchParams({
+    q: `(${sanitized}) AND mediatype:software AND NOT access-restricted-item:true`,
+    'fl[]': 'identifier,title,year,downloads',
+    'sort[]': 'downloads desc',
+    rows: '8',
+    page: '1',
+    output: 'json',
+  });
+
+  try {
+    const searchRes = await fetch(`https://archive.org/advancedsearch.php?${params.toString()}`, {
+      headers: { Accept: 'application/json', 'User-Agent': 'VGFA/0.3' },
+      signal: AbortSignal.timeout(8_000),
+    });
+    if (!searchRes.ok) {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ options: [], note: 'Acervo público temporariamente indisponível.' }));
+      return;
+    }
+
+    const searchJson = (await searchRes.json()) as {
+      response?: { docs?: Array<{ identifier: string; title?: string; year?: string | number }> };
+    };
+    const docs = searchJson.response?.docs ?? [];
+
+    const inspected = await Promise.all(
+      docs.slice(0, 6).map(async (doc) => {
+        try {
+          const metaRes = await fetch(`https://archive.org/metadata/${encodeURIComponent(doc.identifier)}`, {
+            headers: { Accept: 'application/json', 'User-Agent': 'VGFA/0.3' },
+            signal: AbortSignal.timeout(5_000),
+          });
+          if (!metaRes.ok) return [];
+          const data = (await metaRes.json()) as {
+            metadata?: { access_restricted_item?: string };
+            files?: Array<{ name: string; size?: string | number; private?: string | boolean }>;
+          };
+          if (String(data.metadata?.access_restricted_item || '').toLowerCase() === 'true') {
+            return [];
+          }
+
+          // Extrai palavras-chave relevantes do título buscado para filtrar coleções gigantes
+          const queryTokens = sanitized
+            .toLowerCase()
+            .split(/\s+/)
+            .filter((w) => w.length >= 3 && !['the', 'and', 'for', 'ps2', 'ps1', 'psp', 'n64', 'snes', 'nes', 'gba', 'atari', 'usa'].includes(w));
+
+          return (data.files ?? [])
+            .filter((f) => {
+              const isPriv = f.private === true || f.private === 'true';
+              if (isPriv) return false;
+              if (JUNK_FILE_PATTERN.test(f.name)) return false;
+              // Quando o console foi especificado, exige estritamente extensão daquele console!
+              if (consoleId && CONSOLE_EXT_REGEX[consoleId]) {
+                if (!preferredExt.test(f.name)) return false;
+              } else if (!PLAYABLE_DIRECT_EXT.test(f.name)) {
+                return false;
+              }
+              // Em coleções multi-jogo (mais de 15 arquivos), exige correspondência do nome do jogo no arquivo
+              if ((data.files?.length ?? 0) > 15 && queryTokens.length > 0) {
+                const lowerName = f.name.toLowerCase();
+                const hit = queryTokens.some((tok) => lowerName.includes(tok));
+                if (!hit) return false;
+              }
+              return true;
+            })
+            .slice(0, 4)
+            .map((f) => {
+              const size = Number(f.size ?? 0);
+              const lowerName = f.name.toLowerCase();
+              const tokenHits = queryTokens.filter((tok) => lowerName.includes(tok)).length;
+              const matchesConsole = preferredExt.test(f.name);
+              const rawUrl = `https://archive.org/download/${encodeURIComponent(doc.identifier)}/${encodeURIComponent(f.name)}`;
+              const score =
+                (matchesConsole ? 120 : 60) +
+                tokenHits * 40 +
+                (size > 0 && size < 4_700_000_000 ? 15 : 0);
+              return {
+                identifier: doc.identifier,
+                itemTitle: doc.title || doc.identifier,
+                filename: f.name,
+                size,
+                url: rawUrl,
+                proxyUrl: `/api/proxy/stream?url=${encodeURIComponent(rawUrl)}`,
+                playableDirectly: true,
+                isCompressed: false,
+                score,
+              };
+            });
+        } catch {
+          return [];
+        }
+      }),
+    );
+
+    const candidates = inspected
+      .flat()
+      .sort((a, b) => b.score - a.score || a.size - b.size)
+      .slice(0, 6);
+
+    // Verifica de verdade via HEAD se o arquivo realmente está acessível (HTTP 200/206) antes de exibir!
+    const verified: Array<(typeof candidates)[number]> = [];
+    await Promise.all(
+      candidates.map(async (c) => {
+        if (await verifyUrlReachable(c.url)) {
+          verified.push(c);
+        }
+      }),
+    );
+
+    const finalOptions = verified
+      .sort((a, b) => b.score - a.score || a.size - b.size)
+      .map((item, idx) => ({
+        ...item,
+        bestChoice: idx === 0,
+      }));
+
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(
+      JSON.stringify({
+        options: finalOptions,
+        note:
+          finalOptions.length === 0
+            ? 'Nenhuma cópia pública aberta disponível para este título no momento. Escolha o arquivo do seu dispositivo abaixo para jogar imediatamente.'
+            : undefined,
+      }),
+    );
+  } catch {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(
+      JSON.stringify({
+        options: [],
+        note: 'Escolha o arquivo do jogo no seu computador/celular para iniciar imediatamente.',
       }),
     );
   }
@@ -353,6 +536,11 @@ export function createSignalingServer(port = DEFAULT_PORT) {
 
     if (urlObj.pathname === '/api/archive/files') {
       void handleArchiveFiles(res, urlObj);
+      return;
+    }
+
+    if (urlObj.pathname === '/api/archive/smart-find') {
+      void handleArchiveSmartFind(res, urlObj);
       return;
     }
 

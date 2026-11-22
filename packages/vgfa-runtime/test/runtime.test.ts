@@ -17,11 +17,11 @@ test('Catálogo de consoles cobre do Atari 2600 até o PlayStation 2 com cores v
   }
 });
 
-test('Loja VGFA inclui Top PS2 (DBZ BT3, GTA SA, GoW2) e 8 ROMs livres jogáveis em 1 clique', () => {
+test('Loja VGFA inclui Top PS2 (DBZ BT3, GTA SA, GoW2) e 9 ROMs livres jogáveis em 1 clique', () => {
   assert.ok(STORE_CATALOG.length >= 40, 'Loja deve ter ao menos 40 clássicos reais');
   assert.ok(STORE_CATALOG.some((g) => g.id === 'ps2-dbz-bt3' && g.serial === 'SLUS-21678'));
   assert.ok(STORE_CATALOG.some((g) => g.id === 'ps2-gta-sa' && g.serial === 'SLUS-20946'));
-  assert.equal(FREE_PLAYABLE_ROMS.length, 8);
+  assert.equal(FREE_PLAYABLE_ROMS.length, 9);
   assert.equal(ALL_STORE_GAMES.length, STORE_CATALOG.length + FREE_PLAYABLE_ROMS.length);
 });
 

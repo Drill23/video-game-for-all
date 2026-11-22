@@ -23,6 +23,38 @@ export interface ArchivePlayableFile {
   warning?: string;
 }
 
+export interface SmartFindOption {
+  identifier: string;
+  itemTitle: string;
+  filename: string;
+  size: number;
+  url: string;
+  proxyUrl: string;
+  playableDirectly: boolean;
+  isCompressed: boolean;
+  score: number;
+  bestChoice: boolean;
+}
+
+/**
+ * Busca inteligente em 1 passo: pesquisa no acervo público, inspeciona em paralelo,
+ * filtra bloqueados/privados e já destaca a ⭐ Melhor Opção pronta para jogar no navegador!
+ */
+export async function smartFindGameOptions(
+  query: string,
+  consoleId?: ConsoleId,
+  fetchImpl: typeof fetch = fetch,
+): Promise<{ options: SmartFindOption[]; note?: string }> {
+  const clean = query.trim();
+  if (!clean || typeof window === 'undefined') return { options: [] };
+  const params = new URLSearchParams({ q: clean });
+  if (consoleId) params.set('console', consoleId);
+  const res = await fetchImpl(`/api/archive/smart-find?${params.toString()}`);
+  if (!res.ok) return { options: [], note: 'Acervo temporariamente indisponível.' };
+  const data = (await res.json()) as { options?: SmartFindOption[]; note?: string };
+  return { options: data.options ?? [], note: data.note };
+}
+
 export function buildProxyStreamUrl(rawUrl: string): string {
   if (rawUrl.startsWith('/api/proxy/stream')) return rawUrl;
   return `/api/proxy/stream?url=${encodeURIComponent(rawUrl)}`;
