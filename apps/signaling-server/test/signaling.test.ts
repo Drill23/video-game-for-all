@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import http from 'node:http';
 import test from 'node:test';
 import WebSocket from 'ws';
 import { PAD_BIT, decodePadPacket, encodePadPacket } from '@vgfa/pad';
@@ -105,5 +106,50 @@ test('Signaling Server cria sala, pareia celular, troca skin ao vivo e encaminha
     host.close();
   } finally {
     await srv.close();
+  }
+});
+
+test('Proxy CORS-Free (/api/proxy/stream) repassa HTTP 206 Byte Ranges com headers CORP/CORS', async () => {
+  // Mini servidor upstream simulando uma ISO remota com Range 206
+  const payload = Buffer.from('0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ');
+  const upstream = http.createServer((req, res) => {
+    const range = req.headers.range;
+    if (range) {
+      const m = /bytes=(\d+)-(\d+)/.exec(range);
+      if (m) {
+        const start = Number(m[1]);
+        const end = Math.min(payload.length - 1, Number(m[2]));
+        res.writeHead(206, {
+          'Content-Range': `bytes ${start}-${end}/${payload.length}`,
+          'Accept-Ranges': 'bytes',
+          'Content-Length': String(end - start + 1),
+        });
+        res.end(payload.subarray(start, end + 1));
+        return;
+      }
+    }
+    res.writeHead(200, { 'Content-Length': String(payload.length) });
+    res.end(payload);
+  });
+
+  await new Promise<void>((r) => upstream.listen(0, '127.0.0.1', () => r()));
+  const upPort = (upstream.address() as { port: number }).port;
+
+  const srv = createSignalingServer(0);
+  const proxyPort = await srv.start();
+
+  try {
+    const target = encodeURIComponent(`http://127.0.0.1:${upPort}/game.iso`);
+    const res = await fetch(`http://127.0.0.1:${proxyPort}/api/proxy/stream?url=${target}`, {
+      headers: { Range: 'bytes=10-15' },
+    });
+    assert.equal(res.status, 206);
+    assert.equal(res.headers.get('access-control-allow-origin'), '*');
+    assert.equal(res.headers.get('cross-origin-resource-policy'), 'cross-origin');
+    assert.equal(res.headers.get('content-range'), `bytes 10-15/${payload.length}`);
+    assert.equal(await res.text(), 'ABCDEF');
+  } finally {
+    await srv.close();
+    await new Promise<void>((r) => upstream.close(() => r()));
   }
 });

@@ -14,6 +14,8 @@ import {
 } from '@vgfa/runtime';
 
 interface Props {
+  gameTitle?: string;
+  expectedSerial?: string;
   initialFile?: File | null;
   initialUrl?: string | null;
 }
@@ -25,8 +27,14 @@ function fmtSize(bytes: number): string {
   return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
 }
 
-export const Ps2LabPanel: React.FC<Props> = ({ initialFile, initialUrl }) => {
+export const Ps2LabPanel: React.FC<Props> = ({
+  gameTitle = 'PlayStation 2',
+  expectedSerial,
+  initialFile,
+  initialUrl,
+}) => {
   const [caps, setCaps] = useState<WebGpuCapabilities | null>(null);
+  const [engineMode, setEngineMode] = useState<'vgfa-disc' | 'playjs' | 'pcsx2-webgpu'>('vgfa-disc');
   const [session, setSession] = useState<Ps2MountedSession | null>(null);
   const [metrics, setMetrics] = useState<DiscMetrics | null>(null);
   const [isoMeta, setIsoMeta] = useState<Iso9660Metadata | null>(null);
@@ -76,7 +84,11 @@ export const Ps2LabPanel: React.FC<Props> = ({ initialFile, initialUrl }) => {
       setIsoMeta(s.metadata);
       setMetrics(await s.disc.getMetrics());
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Falha ao abrir streaming HTTP Range.');
+      setError(
+        err instanceof Error
+          ? err.message
+          : 'Falha ao abrir streaming HTTP Range (verifique se o link aponta para uma .iso direta e aceita HTTP 206).',
+      );
     } finally {
       setLoading(false);
     }
@@ -98,8 +110,10 @@ export const Ps2LabPanel: React.FC<Props> = ({ initialFile, initialUrl }) => {
       dv.setUint32(pvd + 156 + 2, 20, true);
       dv.setUint32(pvd + 156 + 10, SECTOR, true);
 
+      const serialCode = (expectedSerial || 'SLUS-21678').replace('-', '_');
+      const bootSerial = `${serialCode.slice(0, 8)}.${serialCode.slice(8)}`;
       const cnf = new TextEncoder().encode(
-        'BOOT2 = cdrom0:\\SLUS_209.46;1\r\nVER = 1.03\r\nVMODE = NTSC\r\n',
+        `BOOT2 = cdrom0:\\${bootSerial};1\r\nVER = 1.00\r\nVMODE = NTSC\r\n`,
       );
       const name = new TextEncoder().encode('SYSTEM.CNF;1');
       const root = 20 * SECTOR;
@@ -115,7 +129,6 @@ export const Ps2LabPanel: React.FC<Props> = ({ initialFile, initialUrl }) => {
         onMetrics: setMetrics,
       });
       const meta = await inspectIso9660(disc);
-      // Simula leituras aleatórias + sequenciais
       await disc.read(32768, 4096);
       await disc.read(49152, 8192);
       await disc.read(32768, 2048);
@@ -128,128 +141,221 @@ export const Ps2LabPanel: React.FC<Props> = ({ initialFile, initialUrl }) => {
 
   return (
     <div style={{ padding: 20, display: 'flex', flexDirection: 'column', gap: 16 }}>
-      {/* Hardware Readiness */}
-      <div className="panel" style={{ background: 'var(--bg-0)' }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
-          <strong style={{ fontSize: 15 }}>VGFA-PS2 / PSP WebGPU + WASM Diagnostics</strong>
-          <span className="badge" style={{ color: (caps?.readinessScore ?? 0) >= 60 ? '#34d399' : '#fbbf24' }}>
-            Prontidão: {caps?.readinessScore ?? 0}%
-          </span>
-        </div>
-
-        {caps && (
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(175px, 1fr))', gap: 10 }}>
-            <div className="stat-card">
-              <strong>WebGPU</strong>
-              <span style={{ color: caps.webgpuSupported ? '#34d399' : '#fb7185' }}>
-                {caps.webgpuSupported ? `Ativo (${caps.adapterName})` : 'Indisponível'}
-              </span>
-            </div>
-            <div className="stat-card">
-              <strong>SharedArrayBuffer</strong>
-              <span style={{ color: caps.sharedArrayBuffer && caps.crossOriginIsolated ? '#34d399' : '#fbbf24' }}>
-                {caps.sharedArrayBuffer && caps.crossOriginIsolated ? 'COOP/COEP Ativo' : 'Requer COOP/COEP'}
-              </span>
-            </div>
-            <div className="stat-card">
-              <strong>Sharded OPFS Cache</strong>
-              <span style={{ color: caps.opfsSupported ? '#34d399' : '#fbbf24' }}>
-                {caps.opfsSupported ? 'Disponível (sem teto 2 GB)' : 'Fallback RAM LRU'}
-              </span>
-            </div>
-            <div className="stat-card">
-              <strong>WASM SIMD128 / JSPI</strong>
-              <span>
-                SIMD: {caps.wasmSimdSupported ? 'Sim' : 'Não'} • JSPI: {caps.jspiSupported ? 'Sim' : 'Não'}
-              </span>
-            </div>
-          </div>
-        )}
-      </div>
-
-      {/* Disc Mounting Controls */}
-      <div className="panel" style={{ background: 'var(--bg-0)' }}>
-        <strong style={{ display: 'block', marginBottom: 6, fontSize: 14 }}>
-          1. Montar ISO de PS2 / PSP no Motor VGFA-Disc (Zero Cópia para RAM)
-        </strong>
-        <p style={{ margin: '0 0 12px', fontSize: 12, color: 'var(--text-2)', lineHeight: 1.5 }}>
-          Selecione uma ISO local (ex.: 4,5 GB) ou informe uma URL HTTP Range / WebSeed. O <code>@vgfa/disc</code> lê apenas ~32 KiB do disco para extrair <code>SYSTEM.CNF</code>, Serial e Região sem travar a memória.
-        </p>
-
-        <div className="input-row" style={{ marginBottom: 10 }}>
-          <label className="btn btn-primary" style={{ cursor: 'pointer' }}>
-            Escolher ISO / CHD Local
-            <input
-              type="file"
-              accept=".iso,.bin,.chd,.cso,.zso"
-              style={{ display: 'none' }}
-              onChange={(e) => {
-                const file = e.target.files?.[0];
-                if (file) void mountLocalIso(file);
-              }}
-            />
-          </label>
-          <button className="btn btn-cyan" onClick={() => void runSyntheticBenchmark()}>
-            Testar ISO PS2 Sintética (Demo)
-          </button>
-        </div>
-
-        <div className="input-row">
-          <input
-            className="field"
-            placeholder="https://seu-servidor/ps2-disc.iso (suporte a HTTP 206 Range)"
-            value={urlInput}
-            onChange={(e) => setUrlInput(e.target.value)}
-          />
+      {/* Seletor de Motor PS2 */}
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center', justifyContent: 'space-between' }}>
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
           <button
-            className="btn"
-            disabled={loading || !urlInput.trim()}
-            onClick={() => void mountRemoteUrl(urlInput)}
+            className={`btn btn-sm ${engineMode === 'vgfa-disc' ? 'btn-primary' : 'btn-ghost'}`}
+            onClick={() => setEngineMode('vgfa-disc')}
           >
-            {loading ? 'Lendo...' : 'Montar Streaming'}
+            ⚡ VGFA-Disc Streaming &amp; WebGPU
+          </button>
+          <button
+            className={`btn btn-sm ${engineMode === 'pcsx2-webgpu' ? 'btn-primary' : 'btn-ghost'}`}
+            onClick={() => setEngineMode('pcsx2-webgpu')}
+          >
+            🎮 PCSX2 WebGPU 60 FPS (TabStationToo)
+          </button>
+          <button
+            className={`btn btn-sm ${engineMode === 'playjs' ? 'btn-primary' : 'btn-ghost'}`}
+            onClick={() => setEngineMode('playjs')}
+          >
+            🚀 Play!.js WASM (Sem BIOS)
           </button>
         </div>
 
-        {error && <div style={{ marginTop: 10, color: '#fb7185', fontSize: 12 }}>{error}</div>}
+        <span className="badge" style={{ color: (caps?.readinessScore ?? 0) >= 60 ? '#34d399' : '#fbbf24' }}>
+          WebGPU Ready: {caps?.readinessScore ?? 0}%
+        </span>
       </div>
 
-      {/* Live ISO Metadata + VGFA-Disc Telemetry */}
-      {isoMeta && metrics && (
-        <div className="panel" style={{ background: 'var(--bg-0)', borderColor: 'rgba(56, 189, 248, 0.4)' }}>
-          <strong style={{ display: 'block', marginBottom: 10, fontSize: 14, color: 'var(--cyan)' }}>
-            Disco Montado via VGFA-Disc • {isoMeta.detectedPlatform.toUpperCase()}
+      {/* Modo 1: Emulador Play!.js Zero-BIOS */}
+      {engineMode === 'playjs' && (
+        <div className="panel" style={{ background: 'var(--bg-0)', padding: 14 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10, flexWrap: 'wrap', gap: 8 }}>
+            <div style={{ fontSize: 13 }}>
+              <strong>Play!.js (WebAssembly • Zero BIOS)</strong> — arraste sua ISO/CSO/CHD/ELF de PS2 direto no player abaixo.
+            </div>
+            <a
+              className="btn btn-sm btn-cyan"
+              href="https://playjs.purei.org/"
+              target="_blank"
+              rel="noreferrer"
+            >
+              Abrir em Tela Cheia ↗
+            </a>
+          </div>
+          <iframe
+            title="Play!.js PS2 WebAssembly"
+            src="https://playjs.purei.org/"
+            style={{ width: '100%', height: 540, border: '1px solid var(--border)', borderRadius: 12, background: '#000' }}
+            allow="gamepad *; fullscreen *; autoplay *"
+          />
+        </div>
+      )}
+
+      {/* Modo 2: PCSX2 WebGPU (TabStationToo — 60 FPS com DBZ BT3 & GTA SA) */}
+      {engineMode === 'pcsx2-webgpu' && (
+        <div className="panel" style={{ background: 'var(--bg-0)' }}>
+          <strong style={{ display: 'block', fontSize: 15, marginBottom: 8, color: 'var(--amber)' }}>
+            PCSX2 WebGPU + WASM JIT (TabStationToo) — Recomendado para {gameTitle}
           </strong>
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: 10 }}>
-            <div className="stat-card">
-              <strong>Volume / Serial</strong>
-              <span className="mono">{isoMeta.serial ?? isoMeta.volumeId ?? 'N/A'}</span>
-            </div>
-            <div className="stat-card">
-              <strong>Boot ELF / Região</strong>
-              <span className="mono">
-                {isoMeta.region ?? 'UNKNOWN'} • {isoMeta.videoMode ?? 'AUTO'}
-              </span>
-            </div>
-            <div className="stat-card">
-              <strong>Tamanho ISO vs Baixado</strong>
-              <span className="mono">
-                {fmtSize(metrics.discSizeBytes)} → <strong>{fmtSize(metrics.bytesFromSource)}</strong>
-              </span>
-            </div>
-            <div className="stat-card">
-              <strong>Cache Hits (L1 / L2 OPFS)</strong>
-              <span className="mono">
-                L1: {metrics.l1RamHits} • OPFS: {metrics.l2OpfsHits} • {metrics.avgReadLatencyMs.toFixed(2)} ms
-              </span>
-            </div>
+          <p style={{ margin: '0 0 12px', fontSize: 13, color: 'var(--text-1)', lineHeight: 1.55 }}>
+            O motor <strong>PCSX2 WebGPU/WASM</strong> é o que roda títulos pesados de PS2 como{' '}
+            <strong>Dragon Ball Z: Budokai Tenkaichi 3</strong>, <strong>GTA: San Andreas</strong> e{' '}
+            <strong>Final Fantasy XII</strong> a 50–60 FPS no Chrome/Edge com WebGPU. Ele exige que você selecione sua própria{' '}
+            <strong>BIOS do PS2 (.bin de 4 MB)</strong> + a <strong>ISO do jogo</strong> (tudo local no seu navegador, sem upload).
+          </p>
+
+          <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginBottom: 14 }}>
+            <a
+              className="btn btn-primary"
+              href="https://tabstationtoo.github.io/TabStationToo/"
+              target="_blank"
+              rel="noreferrer"
+            >
+              ▶ Abrir Runtime PCSX2 WebGPU (TabStationToo) ↗
+            </a>
+            <button className="btn btn-cyan" onClick={() => setEngineMode('playjs')}>
+              Testar Sem BIOS (Play!.js)
+            </button>
           </div>
 
-          <div style={{ marginTop: 12, fontSize: 12, color: 'var(--text-2)', lineHeight: 1.5 }}>
-            <strong>Próximo passo para boot gráfico AOT em 60 FPS:</strong> execute{' '}
-            <code className="mono">scripts/vgfa-ps2-recomp-pipeline.sh meu-jogo /caminho/disc.iso</code>{' '}
-            para compilar o executável Emotion Engine via base MIT (<code>ps2-web-recomp</code>) para WebAssembly + WebGPU acoplado ao nosso drive <code>@vgfa/disc</code> e ao controle DualShock 2 via QR Code.
+          <div style={{ fontSize: 12, color: 'var(--text-2)', lineHeight: 1.6 }}>
+            <strong>Por que abre em janela dedicada?</strong> O PCSX2 WebGPU exige isolamento total de memória (<code>COOP: same-origin</code> + <code>COEP: require-corp</code>) em origem própria para seus 8–10 pthreads WebAssembly + JIT dinâmico.
+            <br />
+            <strong>Dica para build AOT 100% nativo no VGFA (sem BIOS):</strong> rode localmente{' '}
+            <code className="mono">
+              ./scripts/vgfa-ps2-recomp-pipeline.sh {expectedSerial?.toLowerCase() || 'ps2-game'} /caminho/para/disc.iso
+            </code>
           </div>
         </div>
+      )}
+
+      {/* Modo 3: VGFA-Disc Streaming + Diagnóstico Real */}
+      {engineMode === 'vgfa-disc' && (
+        <>
+          {caps && (
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(175px, 1fr))', gap: 10 }}>
+              <div className="stat-card">
+                <strong>WebGPU</strong>
+                <span style={{ color: caps.webgpuSupported ? '#34d399' : '#fb7185' }}>
+                  {caps.webgpuSupported ? `Ativo (${caps.adapterName})` : 'Indisponível'}
+                </span>
+              </div>
+              <div className="stat-card">
+                <strong>SharedArrayBuffer</strong>
+                <span style={{ color: caps.sharedArrayBuffer && caps.crossOriginIsolated ? '#34d399' : '#fbbf24' }}>
+                  {caps.sharedArrayBuffer && caps.crossOriginIsolated ? 'COOP/COEP Ativo' : 'Requer COOP/COEP'}
+                </span>
+              </div>
+              <div className="stat-card">
+                <strong>Sharded OPFS Cache</strong>
+                <span style={{ color: caps.opfsSupported ? '#34d399' : '#fbbf24' }}>
+                  {caps.opfsSupported ? 'Disponível (sem teto 2 GB)' : 'Fallback RAM LRU'}
+                </span>
+              </div>
+              <div className="stat-card">
+                <strong>WASM SIMD128 / JSPI</strong>
+                <span>
+                  SIMD: {caps.wasmSimdSupported ? 'Sim' : 'Não'} • JSPI: {caps.jspiSupported ? 'Sim' : 'Não'}
+                </span>
+              </div>
+            </div>
+          )}
+
+          <div className="panel" style={{ background: 'var(--bg-0)' }}>
+            <strong style={{ display: 'block', marginBottom: 6, fontSize: 14 }}>
+              Montar ISO de PS2 via VGFA-Disc (Streaming por Chunks — Zero Cópia para RAM)
+            </strong>
+            <p style={{ margin: '0 0 12px', fontSize: 12, color: 'var(--text-2)', lineHeight: 1.5 }}>
+              Carregue sua ISO local de <strong>{gameTitle}</strong> ou informe uma URL HTTP Range (passa pelo nosso proxy CORS-free <code>/api/proxy/stream</code>). O VGFA identifica <code>SYSTEM.CNF</code> e o Serial lendo apenas ~32 KiB.
+            </p>
+
+            <div className="input-row" style={{ marginBottom: 10 }}>
+              <label className="btn btn-primary" style={{ cursor: 'pointer' }}>
+                📂 Escolher ISO / CHD Local
+                <input
+                  type="file"
+                  accept=".iso,.bin,.chd,.cso,.zso"
+                  style={{ display: 'none' }}
+                  onChange={(e) => {
+                    const file = e.target.files?.[0];
+                    if (file) void mountLocalIso(file);
+                  }}
+                />
+              </label>
+              <button className="btn btn-cyan" onClick={() => void runSyntheticBenchmark()}>
+                Testar ISO PS2 Sintética ({expectedSerial || 'SLUS-21678'})
+              </button>
+            </div>
+
+            <div className="input-row">
+              <input
+                className="field"
+                placeholder="https://seu-servidor/jogo-ps2.iso (HTTP Range 206)"
+                value={urlInput}
+                onChange={(e) => setUrlInput(e.target.value)}
+              />
+              <button
+                className="btn"
+                disabled={loading || !urlInput.trim()}
+                onClick={() => void mountRemoteUrl(urlInput)}
+              >
+                {loading ? 'Lendo...' : 'Montar Streaming'}
+              </button>
+            </div>
+
+            {error && (
+              <div
+                style={{
+                  marginTop: 10,
+                  padding: '10px 12px',
+                  borderRadius: 10,
+                  background: 'rgba(251, 113, 133, 0.12)',
+                  border: '1px solid rgba(251, 113, 133, 0.35)',
+                  color: '#fda4af',
+                  fontSize: 12,
+                  lineHeight: 1.5,
+                }}
+              >
+                {error}
+              </div>
+            )}
+          </div>
+
+          {isoMeta && metrics && (
+            <div className="panel" style={{ background: 'var(--bg-0)', borderColor: 'rgba(56, 189, 248, 0.4)' }}>
+              <strong style={{ display: 'block', marginBottom: 10, fontSize: 14, color: 'var(--cyan)' }}>
+                ✓ Disco Validado via VGFA-Disc • {isoMeta.detectedPlatform.toUpperCase()}
+              </strong>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: 10 }}>
+                <div className="stat-card">
+                  <strong>Volume / Serial</strong>
+                  <span className="mono">{isoMeta.serial ?? isoMeta.volumeId ?? 'N/A'}</span>
+                </div>
+                <div className="stat-card">
+                  <strong>Região / Vídeo</strong>
+                  <span className="mono">
+                    {isoMeta.region ?? 'UNKNOWN'} • {isoMeta.videoMode ?? 'AUTO'}
+                  </span>
+                </div>
+                <div className="stat-card">
+                  <strong>Tamanho ISO vs Lido</strong>
+                  <span className="mono">
+                    {fmtSize(metrics.discSizeBytes)} → <strong>{fmtSize(metrics.bytesFromSource)}</strong>
+                  </span>
+                </div>
+                <div className="stat-card">
+                  <strong>Cache (L1 / OPFS)</strong>
+                  <span className="mono">
+                    L1: {metrics.l1RamHits} • OPFS: {metrics.l2OpfsHits} • {metrics.avgReadLatencyMs.toFixed(2)} ms
+                  </span>
+                </div>
+              </div>
+            </div>
+          )}
+        </>
       )}
     </div>
   );

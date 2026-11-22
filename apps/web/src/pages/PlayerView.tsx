@@ -14,8 +14,11 @@ import {
   CONSOLE_MAP,
   RetroPadKeyBridge,
   VgfaBuiltinArcadeEngine,
+  buildEmulatorJsSrcDoc,
+  fetchRomAsFile,
   launchLibretroWasm,
-  type CatalogGame,
+  type BuiltinVariant,
+  type DownloadProgress,
   type RetroWasmSession,
 } from '@vgfa/runtime';
 import type { VgfaSaveStore } from '@vgfa/storage';
@@ -30,10 +33,18 @@ function getSignalingUrl(): string {
   return `${proto}//${host}:${port}`;
 }
 
+export type PlayerMode = 'libretro-rom' | 'emulatorjs-rom' | 'ps2-webgpu-lab' | 'builtin-arcade';
+
 export interface ActiveSession {
-  game: CatalogGame;
+  id: string;
+  title: string;
+  consoleId: ConsoleId;
+  serial?: string;
+  mode: PlayerMode;
+  builtinVariant?: BuiltinVariant;
   localFile?: File | null;
   remoteUrl?: string | null;
+  romFilename?: string;
 }
 
 interface Props {
@@ -45,9 +56,8 @@ interface Props {
 }
 
 export const PlayerView: React.FC<Props> = ({ t, session, userId, saveStore, onBack }) => {
-  const { game, localFile, remoteUrl } = session;
-  const consoleDef = CONSOLE_MAP[game.consoleId];
-  const padProfile = CONTROLLER_PROFILES[game.consoleId];
+  const consoleDef = CONSOLE_MAP[session.consoleId];
+  const padProfile = CONTROLLER_PROFILES[session.consoleId];
 
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const builtinRef = useRef<VgfaBuiltinArcadeEngine | null>(null);
@@ -64,7 +74,10 @@ export const PlayerView: React.FC<Props> = ({ t, session, userId, saveStore, onB
   const [muted, setMuted] = useState(false);
   const [paused, setPaused] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
-  const [retroStatus, setRetroStatus] = useState<string | null>(null);
+  const [bootStatus, setBootStatus] = useState<string | null>(null);
+  const [bootError, setBootError] = useState<string | null>(null);
+  const [progress, setProgress] = useState<DownloadProgress | null>(null);
+  const [ejsSrcDoc, setEjsSrcDoc] = useState<string | null>(null);
   const [hud, setHud] = useState<{ score: number; lives: number; stage: number; fps: number; extra?: string }>({
     score: 0,
     lives: 3,
@@ -75,10 +88,9 @@ export const PlayerView: React.FC<Props> = ({ t, session, userId, saveStore, onB
 
   const showToast = useCallback((msg: string) => {
     setToast(msg);
-    setTimeout(() => setToast(null), 2600);
+    setTimeout(() => setToast(null), 2800);
   }, []);
 
-  // Combina entrada unificada: Celular QR Code + Controle Bluetooth + Teclado
   const readMergedInput = useCallback((): PadState => {
     const merged = createEmptyPadState(0);
     merged.buttons = keyboardMaskRef.current;
@@ -115,12 +127,12 @@ export const PlayerView: React.FC<Props> = ({ t, session, userId, saveStore, onB
 
   // Host do Controle Remoto via QR Code
   useEffect(() => {
-    const host = new RemotePadHost(getSignalingUrl(), game.consoleId, game.title, {
+    const host = new RemotePadHost(getSignalingUrl(), session.consoleId, session.title, {
       onRoomCreated: (code) => setRoomCode(code),
       onPadsChanged: (pads) => setRemotePads(pads),
       onPadInput: (state) => {
         setLivePad(state);
-        if (game.mode === 'libretro-rom') {
+        if (session.mode === 'libretro-rom') {
           keyBridgeRef.current.push(state, window);
         }
       },
@@ -132,16 +144,14 @@ export const PlayerView: React.FC<Props> = ({ t, session, userId, saveStore, onB
       host.dispose();
       hostRef.current = null;
     };
-  }, [game.consoleId, game.title, game.mode]);
+  }, [session.consoleId, session.title, session.mode]);
 
   // Monitor de controles Bluetooth + Teclado
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       const bit = DEFAULT_KEYBOARD_MAP[e.code];
       if (!bit) return;
-      if (game.mode === 'builtin-arcade') {
-        e.preventDefault();
-      }
+      if (session.mode === 'builtin-arcade') e.preventDefault();
       keyboardMaskRef.current |= bit;
     };
     const onKeyUp = (e: KeyboardEvent) => {
@@ -162,14 +172,19 @@ export const PlayerView: React.FC<Props> = ({ t, session, userId, saveStore, onB
       window.removeEventListener('keyup', onKeyUp);
       clearInterval(interval);
     };
-  }, [game.mode, readMergedInput]);
+  }, [session.mode, readMergedInput]);
 
-  // Inicializa o motor correto conforme o modo do jogo
+  // Boot do Motor Correto (100% livre de corrida de StrictMode)
   useEffect(() => {
-    if (game.mode === 'builtin-arcade' && canvasRef.current) {
+    setBootStatus(null);
+    setBootError(null);
+    setProgress(null);
+    setEjsSrcDoc(null);
+
+    if (session.mode === 'builtin-arcade' && canvasRef.current) {
       const engine = new VgfaBuiltinArcadeEngine(
         canvasRef.current,
-        game.builtinVariant ?? 'star-drift',
+        session.builtinVariant ?? 'neon-arena',
         {
           getInput: readMergedInput,
           onHudUpdate: setHud,
@@ -187,37 +202,112 @@ export const PlayerView: React.FC<Props> = ({ t, session, userId, saveStore, onB
       };
     }
 
-    if (game.mode === 'libretro-rom' && canvasRef.current && (localFile || remoteUrl || game.romUrl)) {
+    if (session.mode === 'libretro-rom' && canvasRef.current && (session.localFile || session.remoteUrl)) {
       let cancelled = false;
-      setRetroStatus(`Carregando core WebAssembly (${consoleDef.libretroCore})...`);
-      void launchLibretroWasm({
-        consoleId: game.consoleId,
-        rom: localFile ?? remoteUrl ?? game.romUrl!,
-        canvas: canvasRef.current,
-      })
-        .then((s) => {
+      const startRetro = async () => {
+        try {
+          setBootStatus(
+            session.remoteUrl
+              ? `Baixando ROM via VGFA Stream Proxy (${consoleDef.name})...`
+              : `Iniciando emulador WebAssembly (${consoleDef.libretroCore})...`,
+          );
+          const s = await launchLibretroWasm({
+            consoleId: session.consoleId,
+            rom: session.localFile ?? session.remoteUrl!,
+            romFilename: session.romFilename,
+            canvas: canvasRef.current!,
+            onProgress: (p) => {
+              if (!cancelled) {
+                setProgress(p);
+                if (p.percent >= 100) {
+                  setBootStatus(`Inicializando core RetroArch WASM (${consoleDef.libretroCore})...`);
+                }
+              }
+            },
+          });
           if (cancelled) {
-            void s.exit();
+            await s.exit();
             return;
           }
           retroRef.current = s;
-          setRetroStatus(null);
-        })
-        .catch((err) => {
+          setBootStatus(null);
+          setProgress(null);
+        } catch (err) {
           if (!cancelled) {
-            setRetroStatus(
-              `Erro ao iniciar core WASM: ${err instanceof Error ? err.message : String(err)}`,
+            setBootStatus(null);
+            setProgress(null);
+            setBootError(
+              err instanceof Error
+                ? err.message
+                : 'Erro ao carregar o emulador WebAssembly para esta ROM.',
             );
           }
-        });
+        }
+      };
 
+      void startRetro();
       return () => {
         cancelled = true;
         void retroRef.current?.exit();
         retroRef.current = null;
       };
     }
-  }, [game, localFile, remoteUrl, consoleDef.libretroCore, readMergedInput]);
+
+    if (session.mode === 'emulatorjs-rom' && (session.localFile || session.remoteUrl)) {
+      let cancelled = false;
+      let objectUrl: string | null = null;
+      const controller = new AbortController();
+
+      const startEjs = async () => {
+        try {
+          const sys = consoleDef.emulatorJsSystem || 'atari2600';
+          let romFile: File;
+          if (session.localFile) {
+            romFile = session.localFile;
+          } else {
+            setBootStatus(`Baixando ROM via VGFA Stream Proxy (${consoleDef.name})...`);
+            const name =
+              session.romFilename ||
+              decodeURIComponent(session.remoteUrl!.split('/').pop()?.split('?')[0] || `game${consoleDef.extensions[0] || '.rom'}`);
+            romFile = await fetchRomAsFile(
+              session.remoteUrl!,
+              name,
+              (p) => {
+                if (!cancelled) setProgress(p);
+              },
+              controller.signal,
+            );
+          }
+
+          if (cancelled) return;
+          objectUrl = URL.createObjectURL(romFile);
+          const html = buildEmulatorJsSrcDoc({
+            system: sys,
+            romBlobUrl: objectUrl,
+            gameTitle: session.title,
+          });
+          setEjsSrcDoc(html);
+          setBootStatus(null);
+          setProgress(null);
+        } catch (err) {
+          if (!cancelled) {
+            setBootStatus(null);
+            setProgress(null);
+            setBootError(
+              err instanceof Error ? err.message : 'Erro ao iniciar o core EmulatorJS WASM.',
+            );
+          }
+        }
+      };
+
+      void startEjs();
+      return () => {
+        cancelled = true;
+        controller.abort();
+        if (objectUrl) URL.revokeObjectURL(objectUrl);
+      };
+    }
+  }, [session, consoleDef, readMergedInput]);
 
   const handleSaveState = async () => {
     try {
@@ -228,14 +318,14 @@ export const PlayerView: React.FC<Props> = ({ t, session, userId, saveStore, onB
         bytes = await retroRef.current.saveState();
       }
       if (!bytes) {
-        showToast('Save state indisponível neste modo.');
+        showToast('Use o botão Save do próprio menu do emulador neste modo.');
         return;
       }
       await saveStore.put({
         userId,
-        consoleId: game.consoleId,
-        gameId: game.id,
-        gameTitle: game.title,
+        consoleId: session.consoleId,
+        gameId: session.id,
+        gameTitle: session.title,
         kind: 'state',
         slot: 1,
         data: bytes,
@@ -247,7 +337,7 @@ export const PlayerView: React.FC<Props> = ({ t, session, userId, saveStore, onB
   };
 
   const handleLoadState = async () => {
-    const rec = await saveStore.get(userId, game.consoleId, game.id, 'state', 1);
+    const rec = await saveStore.get(userId, session.consoleId, session.id, 'state', 1);
     if (!rec) {
       showToast('Nenhum save encontrado para este jogo.');
       return;
@@ -278,7 +368,7 @@ export const PlayerView: React.FC<Props> = ({ t, session, userId, saveStore, onB
   };
 
   const switchConsolePreview = (nextId: ConsoleId) => {
-    hostRef.current?.setActiveConsole(nextId, game.title);
+    hostRef.current?.setActiveConsole(nextId, session.title);
     showToast(`Skin do celular alterada ao vivo para ${CONTROLLER_PROFILES[nextId].title}!`);
   };
 
@@ -293,7 +383,7 @@ export const PlayerView: React.FC<Props> = ({ t, session, userId, saveStore, onB
                 ← {t.backHome}
               </button>
               <div>
-                <div style={{ fontWeight: 800, fontSize: 15 }}>{game.title}</div>
+                <div style={{ fontWeight: 800, fontSize: 15 }}>{session.title}</div>
                 <div style={{ fontSize: 11, color: 'var(--text-2)' }}>
                   {consoleDef.name} • {padProfile.title}
                 </div>
@@ -304,7 +394,7 @@ export const PlayerView: React.FC<Props> = ({ t, session, userId, saveStore, onB
               <button className="btn btn-sm btn-primary" onClick={() => setShowQr(true)}>
                 📱 {t.connectPhone} {roomCode ? `(${roomCode})` : ''}
               </button>
-              {game.mode !== 'ps2-webgpu-lab' && (
+              {(session.mode === 'libretro-rom' || session.mode === 'builtin-arcade') && (
                 <>
                   <button className="btn btn-sm btn-cyan" onClick={() => void handleSaveState()}>
                     💾 {t.saveState}
@@ -315,40 +405,99 @@ export const PlayerView: React.FC<Props> = ({ t, session, userId, saveStore, onB
                   <button className="btn btn-sm btn-ghost" onClick={togglePause}>
                     {paused ? '▶ Retomar' : '⏸ Pausar'}
                   </button>
-                  <button className="btn btn-sm btn-ghost" onClick={toggleMute}>
-                    {muted ? '🔇 Mudo' : '🔊 Som'}
-                  </button>
                 </>
+              )}
+              {session.mode === 'builtin-arcade' && (
+                <button className="btn btn-sm btn-ghost" onClick={toggleMute}>
+                  {muted ? '🔇 Mudo' : '🔊 Som'}
+                </button>
               )}
             </div>
           </div>
 
-          {game.mode === 'ps2-webgpu-lab' ? (
-            <Ps2LabPanel initialFile={localFile} initialUrl={remoteUrl} />
+          {session.mode === 'ps2-webgpu-lab' ? (
+            <Ps2LabPanel
+              gameTitle={session.title}
+              expectedSerial={session.serial}
+              initialFile={session.localFile}
+              initialUrl={session.remoteUrl}
+            />
           ) : (
             <div className="stage-canvas-wrap">
-              <canvas ref={canvasRef} />
-              {retroStatus && (
+              {session.mode === 'emulatorjs-rom' ? (
+                ejsSrcDoc ? (
+                  <iframe
+                    title={session.title}
+                    srcDoc={ejsSrcDoc}
+                    style={{ width: '100%', height: '100%', border: 'none', background: '#000' }}
+                    allow="gamepad *; fullscreen *; autoplay *"
+                  />
+                ) : null
+              ) : (
+                <canvas ref={canvasRef} />
+              )}
+
+              {bootStatus && (
                 <div
                   style={{
                     position: 'absolute',
                     inset: 0,
-                    background: 'rgba(7, 8, 13, 0.85)',
-                    display: 'grid',
-                    placeItems: 'center',
-                    padding: 20,
+                    background: 'rgba(7, 8, 13, 0.9)',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    padding: 24,
                     textAlign: 'center',
                     fontSize: 14,
                   }}
                 >
-                  {retroStatus}
+                  <strong>{bootStatus}</strong>
+                  {progress && (
+                    <>
+                      <div className="progress-track">
+                        <div className="progress-fill" style={{ width: `${progress.percent}%` }} />
+                      </div>
+                      <span className="mono" style={{ fontSize: 12, color: 'var(--text-2)', marginTop: 8 }}>
+                        {(progress.loadedBytes / 1024).toFixed(0)} KB
+                        {progress.totalBytes > 0 ? ` / ${(progress.totalBytes / 1024).toFixed(0)} KB` : ''} ({progress.percent}%)
+                      </span>
+                    </>
+                  )}
+                </div>
+              )}
+
+              {bootError && (
+                <div
+                  style={{
+                    position: 'absolute',
+                    inset: 0,
+                    background: 'rgba(7, 8, 13, 0.94)',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    padding: 24,
+                    textAlign: 'center',
+                    gap: 12,
+                  }}
+                >
+                  <div style={{ color: '#fb7185', fontWeight: 700, fontSize: 15 }}>
+                    Não foi possível carregar este arquivo
+                  </div>
+                  <div style={{ color: 'var(--text-1)', fontSize: 13, maxWidth: 460, lineHeight: 1.5 }}>
+                    {bootError}
+                  </div>
+                  <button className="btn btn-primary" onClick={onBack}>
+                    ← Voltar para a Loja VGFA
+                  </button>
                 </div>
               )}
             </div>
           )}
 
           <div className="hud-strip">
-            {game.mode === 'builtin-arcade' ? (
+            {session.mode === 'builtin-arcade' ? (
               <>
                 <span>
                   SCORE: <strong style={{ color: 'var(--amber)' }}>{hud.score}</strong> • VIDAS:{' '}
@@ -359,8 +508,10 @@ export const PlayerView: React.FC<Props> = ({ t, session, userId, saveStore, onB
               </>
             ) : (
               <>
-                <span>Motor: {consoleDef.engineTier}</span>
-                <span>Teclado: Setas/WASD + Z/X/C/V + Enter</span>
+                <span>
+                  Motor Real: <strong>{consoleDef.libretroCore || consoleDef.emulatorJsSystem || 'VGFA-PS2 WebGPU'}</strong>
+                </span>
+                <span>Teclado: Setas + Z (×/B) + X (○/A) + A/S + Enter (Start) + Shift (Select)</span>
               </>
             )}
           </div>
@@ -445,8 +596,8 @@ export const PlayerView: React.FC<Props> = ({ t, session, userId, saveStore, onB
               {Math.round(livePad.r2Pressure * 100)}%
               <br />
               Mask: 0x{livePad.buttons.toString(16).padStart(4, '0').toUpperCase()}
-              {livePad.buttons & PAD_BIT.SOUTH ? ' [×/A]' : ''}
-              {livePad.buttons & PAD_BIT.EAST ? ' [○/B]' : ''}
+              {livePad.buttons & PAD_BIT.SOUTH ? ' [×/B]' : ''}
+              {livePad.buttons & PAD_BIT.EAST ? ' [○/A]' : ''}
               {livePad.buttons & PAD_BIT.START ? ' [START]' : ''}
             </div>
 

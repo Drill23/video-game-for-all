@@ -10,6 +10,7 @@ import {
   type SabDiscBuffer,
 } from '@vgfa/disc';
 import type { PadState } from '@vgfa/pad';
+import { buildProxyStreamUrl } from './archive-search.js';
 
 export interface WebGpuCapabilities {
   webgpuSupported: boolean;
@@ -147,7 +148,12 @@ export async function mountPs2DiscSession(
   const source =
     input.kind === 'file'
       ? new LocalFileSource(input.file, input.file.name)
-      : await HttpRangeSource.open(input.url, { name: input.name });
+      : await HttpRangeSource.open(
+          typeof window !== 'undefined' && /^https?:\/\//i.test(input.url)
+            ? buildProxyStreamUrl(input.url)
+            : input.url,
+          { name: input.name ?? decodeURIComponent(input.url.split('/').pop()?.split('?')[0] || 'disc.iso') },
+        );
 
   const opfsCache = ShardedOpfsChunkCache.isSupported()
     ? new ShardedOpfsChunkCache(384 * 1024 * 1024)

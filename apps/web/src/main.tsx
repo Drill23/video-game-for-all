@@ -1,10 +1,6 @@
-import React from 'react';
 import ReactDOM from 'react-dom/client';
 import { App } from './App.js';
 import './styles/theme.css';
 
-ReactDOM.createRoot(document.getElementById('root')!).render(
-  <React.StrictMode>
-    <App />
-  </React.StrictMode>,
-);
+// Evita double-mount do StrictMode sobre contextos WebGL/WebGPU/WASM do RetroArch
+ReactDOM.createRoot(document.getElementById('root')!).render(<App />);

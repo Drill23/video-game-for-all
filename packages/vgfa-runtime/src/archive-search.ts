@@ -5,27 +5,32 @@ export interface ArchiveSearchResult {
   title: string;
   creator?: string;
   year?: string;
+  downloads?: number;
   consoleHint: ConsoleId;
   detailsUrl: string;
   thumbnailUrl: string;
   collection: string;
 }
 
-const CONSOLE_COLLECTIONS: Partial<Record<ConsoleId, string>> = {
-  atari2600: 'atari_2600_library',
-  nes: 'internetarcade',
-  snes: 'consolelivingroom',
-  megadrive: 'sega_genesis_library',
-  gba: 'consolelivingroom',
-  n64: 'consolelivingroom',
-  ps1: 'consolelivingroom',
-  psp: 'softwarelibrary',
-  ps2: 'softwarelibrary',
-};
+export interface ArchivePlayableFile {
+  name: string;
+  size: number;
+  url: string;
+  proxyUrl: string;
+  isPrivate: boolean;
+  isCompressed: boolean;
+  playableDirectly: boolean;
+  warning?: string;
+}
+
+export function buildProxyStreamUrl(rawUrl: string): string {
+  if (rawUrl.startsWith('/api/proxy/stream')) return rawUrl;
+  return `/api/proxy/stream?url=${encodeURIComponent(rawUrl)}`;
+}
 
 /**
- * Pesquisa ao vivo no acervo público do Internet Archive (sem precisar armazenar arquivos no servidor).
- * Retorna itens públicos com links de metadados e suporte a leitura de arquivos compatíveis.
+ * Pesquisa ao vivo no Internet Archive usando o proxy CORS-free local (/api/archive/search),
+ * eliminando bloqueios CORS/COEP e ordenando pelos itens mais relevantes.
  */
 export async function searchInternetArchive(
   query: string,
@@ -36,27 +41,37 @@ export async function searchInternetArchive(
   const clean = query.trim();
   if (!clean) return [];
 
-  const collection = consoleId ? CONSOLE_COLLECTIONS[consoleId] : undefined;
-  const colClause = collection
-    ? `collection:(${collection} OR consolelivingroom OR homebrew)`
-    : 'mediatype:software';
-
-  const q = `(${clean.replace(/[()"]/g, ' ')}) AND ${colClause}`;
   const params = new URLSearchParams({
-    q,
-    'fl[]': 'identifier,title,creator,year,collection',
-    rows: String(Math.min(24, Math.max(1, limit))),
+    q: clean,
+    limit: String(Math.min(24, Math.max(1, limit))),
+  });
+  if (consoleId) params.set('console', consoleId);
+
+  // No navegador usa o endpoint do nosso servidor local (sem bloqueio CORS/COEP)
+  if (typeof window !== 'undefined') {
+    const res = await fetchImpl(`/api/archive/search?${params.toString()}`);
+    if (!res.ok) {
+      const errBody = await res.json().catch(() => ({})) as { error?: string };
+      throw new Error(errBody.error || `Falha na busca (HTTP ${res.status})`);
+    }
+    const json = (await res.json()) as { results?: Omit<ArchiveSearchResult, 'consoleHint'>[] };
+    return (json.results ?? []).map((r) => ({
+      ...r,
+      consoleHint: consoleId ?? 'ps2',
+    }));
+  }
+
+  // Fallback direto fora do navegador (ex.: testes Node)
+  const fallbackParams = new URLSearchParams({
+    q: `(${clean.replace(/[()"]/g, ' ')}) AND mediatype:software`,
+    'fl[]': 'identifier,title,creator,year,collection,downloads',
+    rows: String(limit),
     page: '1',
     output: 'json',
   });
-
-  const url = `https://archive.org/advancedsearch.php?${params.toString()}`;
-  const res = await fetchImpl(url, { headers: { Accept: 'application/json' } });
-  if (!res.ok) {
-    throw new Error(`Internet Archive retornou HTTP ${res.status}`);
-  }
-
-  const json = (await res.json()) as {
+  const res = await fetchImpl(`https://archive.org/advancedsearch.php?${fallbackParams.toString()}`);
+  if (!res.ok) throw new Error(`Internet Archive retornou HTTP ${res.status}`);
+  const data = (await res.json()) as {
     response?: {
       docs?: Array<{
         identifier: string;
@@ -64,52 +79,42 @@ export async function searchInternetArchive(
         creator?: string | string[];
         year?: string | number;
         collection?: string | string[];
+        downloads?: number;
       }>;
     };
   };
-
-  const docs = json.response?.docs ?? [];
-  return docs.map((d) => {
-    const col = Array.isArray(d.collection) ? d.collection[0] : (d.collection ?? 'software');
-    return {
-      identifier: d.identifier,
-      title: d.title || d.identifier,
-      creator: Array.isArray(d.creator) ? d.creator[0] : d.creator,
-      year: d.year ? String(d.year) : undefined,
-      consoleHint: consoleId ?? 'atari2600',
-      detailsUrl: `https://archive.org/details/${encodeURIComponent(d.identifier)}`,
-      thumbnailUrl: `https://archive.org/services/img/${encodeURIComponent(d.identifier)}`,
-      collection: col,
-    };
-  });
-}
-
-export interface ArchivePlayableFile {
-  name: string;
-  size: number;
-  url: string;
+  return (data.response?.docs ?? []).map((d) => ({
+    identifier: d.identifier,
+    title: d.title || d.identifier,
+    creator: Array.isArray(d.creator) ? d.creator[0] : d.creator,
+    year: d.year ? String(d.year) : undefined,
+    downloads: d.downloads ?? 0,
+    consoleHint: consoleId ?? 'ps2',
+    detailsUrl: `https://archive.org/details/${encodeURIComponent(d.identifier)}`,
+    thumbnailUrl: `https://archive.org/services/img/${encodeURIComponent(d.identifier)}`,
+    collection: Array.isArray(d.collection) ? d.collection[0] : (d.collection ?? 'software'),
+  }));
 }
 
 /**
- * Inspeciona os arquivos dentro de um item do Internet Archive e lista ROMs/ISOs suportadas
- * prontas para streaming via HTTP Range (CORS habilitado no archive.org!).
+ * Lista arquivos do item no Internet Archive com validação clara de:
+ * - playableDirectly (ROM/ISO direta pronta para streaming/play)
+ * - isCompressed (.zip/.7z grande que exige extração)
+ * - isPrivate (item restrito/login obrigatório na origem)
  */
 export async function listArchiveFiles(
   identifier: string,
   fetchImpl: typeof fetch = fetch,
-): Promise<ArchivePlayableFile[]> {
-  const res = await fetchImpl(`https://archive.org/metadata/${encodeURIComponent(identifier)}`);
-  if (!res.ok) return [];
-  const data = (await res.json()) as {
-    files?: Array<{ name: string; size?: string | number }>;
-  };
-  const exts = /\.(a26|nes|sfc|smc|md|gen|gb|gbc|gba|z64|n64|v64|iso|chd|cso|bin|zip)$/i;
-  return (data.files ?? [])
-    .filter((f) => exts.test(f.name))
-    .map((f) => ({
-      name: f.name,
-      size: Number(f.size ?? 0),
-      url: `https://archive.org/download/${encodeURIComponent(identifier)}/${encodeURIComponent(f.name)}`,
-    }))
-    .sort((a, b) => a.size - b.size);
+): Promise<{ restricted: boolean; files: ArchivePlayableFile[] }> {
+  if (typeof window !== 'undefined') {
+    const res = await fetchImpl(`/api/archive/files?id=${encodeURIComponent(identifier)}`);
+    if (!res.ok) {
+      const errBody = await res.json().catch(() => ({})) as { error?: string };
+      throw new Error(errBody.error || `Falha ao listar arquivos (HTTP ${res.status})`);
+    }
+    const data = (await res.json()) as { restricted?: boolean; files?: ArchivePlayableFile[] };
+    return { restricted: Boolean(data.restricted), files: data.files ?? [] };
+  }
+
+  return { restricted: false, files: [] };
 }

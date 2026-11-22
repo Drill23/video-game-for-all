@@ -1,14 +1,14 @@
 #!/usr/bin/env node
 import { spawn } from 'node:child_process';
 
+const pnpmBin = process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm';
+
 const children = [
-  spawn('pnpm', ['--filter', '@vgfa/signaling-server', 'dev'], {
+  spawn(pnpmBin, ['--filter', '@vgfa/signaling-server', 'dev'], {
     stdio: 'inherit',
-    shell: true,
   }),
-  spawn('pnpm', ['--filter', '@vgfa/web', 'dev'], {
+  spawn(pnpmBin, ['--filter', '@vgfa/web', 'dev'], {
     stdio: 'inherit',
-    shell: true,
   }),
 ];
 
