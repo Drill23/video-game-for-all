@@ -63,7 +63,7 @@ export function createEmptyPadState(slot = 0): PadState {
 export interface ConnectedPadInfo {
   id: string;
   slot: number;
-  kind: 'phone-webrtc' | 'phone-ws' | 'bluetooth' | 'keyboard';
+  kind: 'phone-webrtc' | 'phone-ws' | 'phone-relay' | 'bluetooth' | 'keyboard';
   label: string;
   latencyMs?: number;
   connectedAt: number;

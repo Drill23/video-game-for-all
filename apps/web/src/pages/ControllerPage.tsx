@@ -1,14 +1,18 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import {
-  RemotePadClient,
-  type ConsoleId,
-  type PadState,
-} from '@vgfa/pad';
+import { RemotePadClient, type ConsoleId, type PadState, type PadTransport } from '@vgfa/pad';
 import { GamepadPhoneView } from '../components/GamepadPhoneView.js';
+import '../styles/pad.css';
 
 function getSignalingUrl(): string {
+  if (/\.github\.io$/i.test(window.location.hostname)) return 'serverless';
   const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
   return `${proto}//${window.location.host}/ws`;
+}
+
+function normalizeCode(raw: string): string {
+  const clean = raw.trim().toUpperCase().replace(/\s+/g, '');
+  if (!clean) return '';
+  return clean.startsWith('VGFA-') ? clean : `VGFA-${clean.replace(/^VGFA/, '')}`;
 }
 
 interface Props {
@@ -17,33 +21,41 @@ interface Props {
 
 export const ControllerPage: React.FC<Props> = ({ initialRoomCode }) => {
   const [roomInput, setRoomInput] = useState(initialRoomCode ?? '');
+  const [connecting, setConnecting] = useState(false);
   const [connected, setConnected] = useState(false);
   const [previewMode, setPreviewMode] = useState(false);
   const [slot, setSlot] = useState(0);
-  const [consoleId, setConsoleId] = useState<ConsoleId>('ps2');
-  const [gameTitle, setGameTitle] = useState('VGFA Controller');
-  const [transport, setTransport] = useState<'webrtc' | 'ws' | 'preview'>('ws');
+  const [consoleId, setConsoleId] = useState<ConsoleId>('snes');
+  const [gameTitle, setGameTitle] = useState('VGFA');
+  const [transport, setTransport] = useState<PadTransport | 'preview'>('relay');
+  const [statusText, setStatusText] = useState<string | null>(null);
   const [statusError, setStatusError] = useState<string | null>(null);
   const [rumbleActive, setRumbleActive] = useState(false);
 
   const clientRef = useRef<RemotePadClient | null>(null);
 
   const connectToRoom = useCallback((code: string) => {
-    const clean = code.trim().toUpperCase();
+    const clean = normalizeCode(code);
     if (!clean) return;
     setStatusError(null);
+    setConnecting(true);
+    setStatusText('Conectando…');
     clientRef.current?.dispose();
 
     const ua = navigator.userAgent || '';
-    const deviceLabel = /iPhone|iPad/i.test(ua)
-      ? 'iPhone VGFA'
-      : /Android/i.test(ua)
-        ? 'Android VGFA'
-        : 'Celular/Navegador VGFA';
+    const deviceLabel = /iPhone/i.test(ua)
+      ? 'iPhone'
+      : /iPad/i.test(ua)
+        ? 'iPad'
+        : /Android/i.test(ua)
+          ? 'Android'
+          : 'Navegador';
 
     const client = new RemotePadClient(getSignalingUrl(), clean, deviceLabel, {
       onConnected: (info) => {
         setConnected(true);
+        setConnecting(false);
+        setStatusText(null);
         setSlot(info.slot);
         setConsoleId(info.consoleId);
         setGameTitle(info.gameTitle);
@@ -53,30 +65,43 @@ export const ControllerPage: React.FC<Props> = ({ initialRoomCode }) => {
         setGameTitle(nextTitle);
       },
       onTransportChanged: (t) => setTransport(t),
+      onStatus: (text) => setStatusText(text),
       onRumble: (cmd) => {
         setRumbleActive(true);
         setTimeout(() => setRumbleActive(false), Math.min(350, cmd.durationMs || 120));
       },
       onDisconnected: (reason) => {
         setConnected(false);
+        setConnecting(false);
+        setStatusText(null);
         setStatusError(reason ?? 'Desconectado da sala.');
       },
     });
     clientRef.current = client;
     client.connect();
+    try {
+      localStorage.setItem('vgfa:last-pad-room', clean);
+    } catch {}
   }, []);
 
   useEffect(() => {
-    if (initialRoomCode) {
-      connectToRoom(initialRoomCode);
-    }
+    if (initialRoomCode) connectToRoom(initialRoomCode);
     return () => {
       clientRef.current?.dispose();
+      clientRef.current = null;
     };
   }, [initialRoomCode, connectToRoom]);
 
   const handleStateChange = useCallback((state: Omit<PadState, 'slot' | 'seq'>) => {
     clientRef.current?.sendState(state);
+  }, []);
+
+  const leave = useCallback(() => {
+    clientRef.current?.dispose();
+    clientRef.current = null;
+    setConnected(false);
+    setConnecting(false);
+    setPreviewMode(false);
   }, []);
 
   if (connected || previewMode) {
@@ -89,69 +114,90 @@ export const ControllerPage: React.FC<Props> = ({ initialRoomCode }) => {
         rumbleActive={rumbleActive}
         onStateChange={handleStateChange}
         onConsolePreviewChange={previewMode ? setConsoleId : undefined}
+        onExit={leave}
+        notice={previewMode ? null : statusText}
       />
     );
   }
 
+  const basePath = (import.meta.env.BASE_URL || '/').replace(/\/$/, '');
+  let lastRoom = '';
+  try {
+    lastRoom = localStorage.getItem('vgfa:last-pad-room') || '';
+  } catch {}
+
   return (
-    <div
-      style={{
-        minHeight: '100vh',
-        display: 'grid',
-        placeItems: 'center',
-        padding: 20,
-      }}
-    >
-      <div className="modal-card" style={{ maxWidth: 420 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 14 }}>
-          <div className="vgfa-logo">VGFA</div>
+    <div className="vc-screen">
+      <div className="vp-ambient" aria-hidden />
+      <div className="vc-card">
+        <div className="vc-brand">
+          <img src={`${basePath}/icons/icon.svg`} alt="" width={48} height={48} onError={(e) => (e.currentTarget.style.display = 'none')} />
           <div>
-            <div style={{ fontWeight: 800, fontSize: 17 }}>VGFA Remote Pad</div>
-            <div style={{ fontSize: 12, color: 'var(--text-2)' }}>
-              Celular como Controle Adaptativo (Atari → PS2)
-            </div>
+            <strong>Controle VGFA</strong>
+            <span>Seu celular vira o controle do jogo</span>
           </div>
         </div>
 
-        <p style={{ fontSize: 13, color: 'var(--text-1)', lineHeight: 1.5, marginBottom: 16 }}>
-          Digite o <strong>Código da Sala</strong> exibido na tela do jogo (ou escaneie o QR Code) para parear instantaneamente.
-        </p>
+        {connecting ? (
+          <div className="vc-wait">
+            <div className="vc-spinner" />
+            <p>{statusText ?? 'Conectando…'}</p>
+            <small>Código {normalizeCode(roomInput) || roomInput}</small>
+            <button className="vc-btn ghost" onClick={leave}>
+              Cancelar
+            </button>
+          </div>
+        ) : (
+          <>
+            <p className="vc-help">
+              Digite o <b>código da sala</b> que aparece na tela do jogo — ou escaneie o QR Code com a câmera.
+            </p>
+            <form
+              className="vc-form"
+              onSubmit={(e) => {
+                e.preventDefault();
+                connectToRoom(roomInput);
+              }}
+            >
+              <input
+                className="vc-input"
+                placeholder="VGFA-7K3M"
+                value={roomInput}
+                autoCapitalize="characters"
+                autoCorrect="off"
+                spellCheck={false}
+                inputMode="text"
+                onChange={(e) => setRoomInput(e.target.value.toUpperCase())}
+              />
+              {statusError && <div className="vc-error">{statusError}</div>}
+              <button className="vc-btn primary" type="submit" disabled={!roomInput.trim()}>
+                Conectar
+              </button>
+              {lastRoom && lastRoom !== normalizeCode(roomInput) && (
+                <button type="button" className="vc-btn ghost" onClick={() => {
+                  setRoomInput(lastRoom);
+                  connectToRoom(lastRoom);
+                }}>
+                  Reconectar em {lastRoom}
+                </button>
+              )}
+            </form>
+          </>
+        )}
 
-        <form
-          onSubmit={(e) => {
-            e.preventDefault();
-            connectToRoom(roomInput);
-          }}
-          style={{ display: 'flex', flexDirection: 'column', gap: 10 }}
-        >
-          <input
-            className="field mono"
-            placeholder="Ex.: VGFA-7K3M"
-            value={roomInput}
-            onChange={(e) => setRoomInput(e.target.value.toUpperCase())}
-            style={{ textAlign: 'center', fontSize: 18, letterSpacing: '0.1em' }}
-          />
-          {statusError && (
-            <div style={{ color: '#fb7185', fontSize: 12, textAlign: 'center' }}>{statusError}</div>
-          )}
-          <button className="btn btn-primary" type="submit">
-            Conectar à Tela Principal
-          </button>
-        </form>
-
-        <div style={{ marginTop: 14, paddingTop: 14, borderTop: '1px solid var(--border)', display: 'flex', flexDirection: 'column', gap: 8 }}>
+        <div className="vc-foot">
           <button
-            className="btn btn-cyan"
+            className="vc-btn ghost"
             onClick={() => {
               setPreviewMode(true);
               setTransport('preview');
-              setGameTitle('Modo Visualização de Controles');
+              setGameTitle('Teste os controles');
             }}
           >
-            Visualizar Layouts (Atari → DualShock 2)
+            Testar layouts dos controles
           </button>
-          <a className="btn btn-ghost" href="/">
-            Voltar ao Portal VGFA
+          <a className="vc-link" href={`${basePath}/`}>
+            Voltar para a Central
           </a>
         </div>
       </div>

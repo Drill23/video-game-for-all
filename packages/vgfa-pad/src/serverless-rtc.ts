@@ -11,10 +11,11 @@ const TRACKERS = [
   'wss://tracker.webtorrent.dev',
 ];
 
-const ICE_SERVERS: RTCIceServer[] = [
-  { urls: 'stun:stun.l.google.com:19302' },
+export const VGFA_ICE_SERVERS: RTCIceServer[] = [
+  { urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] },
   { urls: 'stun:stun.cloudflare.com:3478' },
 ];
+const ICE_SERVERS = VGFA_ICE_SERVERS;
 
 export function generateLocalRoomCode(prefix = 'VGFA'): string {
   const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -185,5 +186,5 @@ export class ServerlessTrackerRoom {
 }
 
 export function createRtcPeer(): RTCPeerConnection {
-  return new RTCPeerConnection({ iceServers: ICE_SERVERS });
+  return new RTCPeerConnection({ iceServers: ICE_SERVERS, bundlePolicy: 'max-bundle' });
 }

@@ -1,4 +1,4 @@
-import React, { useCallback, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   CONTROLLER_PROFILES,
   PAD_BIT,
@@ -42,37 +42,82 @@ export const MobileInlinePad: React.FC<Props> = ({ consoleId, onStateChange }) =
     onStateChange({ ...stateRef.current });
   }, [onStateChange]);
 
-  const setBit = useCallback(
-    (bit: number, down: boolean) => {
-      const next = down
-        ? stateRef.current.buttons | bit
-        : stateRef.current.buttons & ~bit;
-      stateRef.current.buttons = next;
-      if (bit === PAD_BIT.L2) stateRef.current.l2Pressure = down ? 1 : 0;
-      if (bit === PAD_BIT.R2) stateRef.current.r2Pressure = down ? 1 : 0;
-      if (bit === PAD_BIT.SOUTH) stateRef.current.crossPressure = down ? 1 : 0;
-      if (bit === PAD_BIT.WEST) stateRef.current.squarePressure = down ? 1 : 0;
-      setPressedMask(next);
-      if (down && typeof navigator !== 'undefined' && typeof navigator.vibrate === 'function') {
-        navigator.vibrate(10);
-      }
-      emit();
-    },
-    [emit],
-  );
+  // Motor de toque com "deslizar": o dedo pode passar de um botão para outro (B→A no Mario)
+  const touchBits = useRef(new Map<number, number>());
+  const applyTouchMask = useCallback(() => {
+    let mask = 0;
+    for (const bit of touchBits.current.values()) mask |= bit;
+    const prev = stateRef.current.buttons;
+    if (mask === prev) return;
+    const gained = mask & ~prev;
+    stateRef.current.buttons = mask;
+    stateRef.current.l2Pressure = mask & PAD_BIT.L2 ? 1 : 0;
+    stateRef.current.r2Pressure = mask & PAD_BIT.R2 ? 1 : 0;
+    stateRef.current.crossPressure = mask & PAD_BIT.SOUTH ? 1 : 0;
+    stateRef.current.squarePressure = mask & PAD_BIT.WEST ? 1 : 0;
+    setPressedMask(mask);
+    if (gained && typeof navigator !== 'undefined' && typeof navigator.vibrate === 'function') {
+      try {
+        navigator.vibrate(9);
+      } catch {}
+    }
+    emit();
+  }, [emit]);
 
-  const bindTouch = (bit: number) => ({
-    onPointerDown: (e: React.PointerEvent<HTMLButtonElement>) => {
+  const bitAt = (x: number, y: number): number => {
+    const el = document.elementFromPoint(x, y) as HTMLElement | null;
+    const btn = el?.closest('[data-bit]') as HTMLElement | null;
+    return btn ? Number(btn.dataset.bit) || 0 : 0;
+  };
+
+  const deckHandlers = {
+    onPointerDown: (e: React.PointerEvent<HTMLDivElement>) => {
+      const bit = bitAt(e.clientX, e.clientY);
+      if (!bit) return;
       e.preventDefault();
-      e.currentTarget.setPointerCapture(e.pointerId);
-      setBit(bit, true);
+      touchBits.current.set(e.pointerId, bit);
+      try {
+        e.currentTarget.setPointerCapture(e.pointerId);
+      } catch {}
+      applyTouchMask();
     },
-    onPointerUp: (e: React.PointerEvent<HTMLButtonElement>) => {
+    onPointerMove: (e: React.PointerEvent<HTMLDivElement>) => {
+      if (!touchBits.current.has(e.pointerId)) return;
       e.preventDefault();
-      setBit(bit, false);
+      touchBits.current.set(e.pointerId, bitAt(e.clientX, e.clientY));
+      applyTouchMask();
     },
-    onPointerCancel: () => setBit(bit, false),
-  });
+    onPointerUp: (e: React.PointerEvent<HTMLDivElement>) => {
+      if (!touchBits.current.delete(e.pointerId)) return;
+      applyTouchMask();
+    },
+    onPointerCancel: (e: React.PointerEvent<HTMLDivElement>) => {
+      if (!touchBits.current.delete(e.pointerId)) return;
+      applyTouchMask();
+    },
+    onLostPointerCapture: (e: React.PointerEvent<HTMLDivElement>) => {
+      if (!touchBits.current.delete(e.pointerId)) return;
+      applyTouchMask();
+    },
+    onContextMenu: (e: React.MouseEvent) => e.preventDefault(),
+  };
+
+  // App em segundo plano / tela bloqueada: solta tudo
+  useEffect(() => {
+    const releaseAll = () => {
+      touchBits.current.clear();
+      applyTouchMask();
+    };
+    const onVis = () => {
+      if (document.visibilityState === 'hidden') releaseAll();
+    };
+    window.addEventListener('blur', releaseAll);
+    document.addEventListener('visibilitychange', onVis);
+    return () => {
+      window.removeEventListener('blur', releaseAll);
+      document.removeEventListener('visibilitychange', onVis);
+    };
+  }, [applyTouchMask]);
 
   const updateStick = (clientX: number, clientY: number) => {
     const el = stickBaseRef.current;
@@ -110,7 +155,7 @@ export const MobileInlinePad: React.FC<Props> = ({ consoleId, onStateChange }) =
   };
 
   return (
-    <div className="mobile-deck">
+    <div className="mobile-deck" style={{ touchAction: 'none', userSelect: 'none', WebkitUserSelect: 'none' }} {...deckHandlers}>
       {/* Ombros (L1/L2 & R1/R2) */}
       {profile.shoulders.length > 0 && (
         <div className="mobile-deck-shoulders">
@@ -119,7 +164,7 @@ export const MobileInlinePad: React.FC<Props> = ({ consoleId, onStateChange }) =
               <button
                 key={s.name}
                 className={`mobile-shoulder ${pressedMask & s.bit ? 'pressed' : ''}`}
-                {...bindTouch(s.bit)}
+                data-bit={s.bit}
               >
                 {s.label}
               </button>
@@ -133,7 +178,7 @@ export const MobileInlinePad: React.FC<Props> = ({ consoleId, onStateChange }) =
               <button
                 key={s.name}
                 className={`mobile-shoulder ${pressedMask & s.bit ? 'pressed' : ''}`}
-                {...bindTouch(s.bit)}
+                data-bit={s.bit}
               >
                 {s.label}
               </button>
@@ -172,19 +217,19 @@ export const MobileInlinePad: React.FC<Props> = ({ consoleId, onStateChange }) =
           ) : (
             <div className="mobile-dpad">
               <div />
-              <button className={`mobile-dkey ${pressedMask & PAD_BIT.UP ? 'pressed' : ''}`} {...bindTouch(PAD_BIT.UP)}>
+              <button className={`mobile-dkey ${pressedMask & PAD_BIT.UP ? 'pressed' : ''}`} data-bit={PAD_BIT.UP}>
                 ▲
               </button>
               <div />
-              <button className={`mobile-dkey ${pressedMask & PAD_BIT.LEFT ? 'pressed' : ''}`} {...bindTouch(PAD_BIT.LEFT)}>
+              <button className={`mobile-dkey ${pressedMask & PAD_BIT.LEFT ? 'pressed' : ''}`} data-bit={PAD_BIT.LEFT}>
                 ◀
               </button>
               <div className="mobile-dcenter" />
-              <button className={`mobile-dkey ${pressedMask & PAD_BIT.RIGHT ? 'pressed' : ''}`} {...bindTouch(PAD_BIT.RIGHT)}>
+              <button className={`mobile-dkey ${pressedMask & PAD_BIT.RIGHT ? 'pressed' : ''}`} data-bit={PAD_BIT.RIGHT}>
                 ▶
               </button>
               <div />
-              <button className={`mobile-dkey ${pressedMask & PAD_BIT.DOWN ? 'pressed' : ''}`} {...bindTouch(PAD_BIT.DOWN)}>
+              <button className={`mobile-dkey ${pressedMask & PAD_BIT.DOWN ? 'pressed' : ''}`} data-bit={PAD_BIT.DOWN}>
                 ▼
               </button>
               <div />
@@ -200,7 +245,7 @@ export const MobileInlinePad: React.FC<Props> = ({ consoleId, onStateChange }) =
               <button
                 key={b.name}
                 className={`mobile-center-btn ${pressedMask & b.bit ? 'pressed' : ''}`}
-                {...bindTouch(b.bit)}
+                data-bit={b.bit}
               >
                 {b.label}
               </button>
@@ -216,7 +261,7 @@ export const MobileInlinePad: React.FC<Props> = ({ consoleId, onStateChange }) =
                 background: profile.faceButtons[0].color,
                 color: profile.faceButtons[0].textColor ?? '#FFF',
               }}
-              {...bindTouch(profile.faceButtons[0].bit)}
+              data-bit={profile.faceButtons[0].bit}
             >
               {profile.faceButtons[0].label}
             </button>
@@ -227,7 +272,7 @@ export const MobileInlinePad: React.FC<Props> = ({ consoleId, onStateChange }) =
                   key={b.name}
                   className={`mobile-face-md ${pressedMask & b.bit ? 'pressed' : ''}`}
                   style={{ background: b.color, color: b.textColor ?? '#FFF' }}
-                  {...bindTouch(b.bit)}
+                  data-bit={b.bit}
                 >
                   {b.label}
                 </button>
@@ -240,7 +285,7 @@ export const MobileInlinePad: React.FC<Props> = ({ consoleId, onStateChange }) =
                 <button
                   className={`mobile-face-sm ${pressedMask & faceByPos.north.bit ? 'pressed' : ''}`}
                   style={{ background: faceByPos.north.color, color: faceByPos.north.textColor ?? '#FFF' }}
-                  {...bindTouch(faceByPos.north.bit)}
+                  data-bit={faceByPos.north.bit}
                 >
                   {faceByPos.north.label}
                 </button>
@@ -252,7 +297,7 @@ export const MobileInlinePad: React.FC<Props> = ({ consoleId, onStateChange }) =
                 <button
                   className={`mobile-face-sm ${pressedMask & faceByPos.west.bit ? 'pressed' : ''}`}
                   style={{ background: faceByPos.west.color, color: faceByPos.west.textColor ?? '#FFF' }}
-                  {...bindTouch(faceByPos.west.bit)}
+                  data-bit={faceByPos.west.bit}
                 >
                   {faceByPos.west.label}
                 </button>
@@ -264,7 +309,7 @@ export const MobileInlinePad: React.FC<Props> = ({ consoleId, onStateChange }) =
                 <button
                   className={`mobile-face-sm ${pressedMask & faceByPos.east.bit ? 'pressed' : ''}`}
                   style={{ background: faceByPos.east.color, color: faceByPos.east.textColor ?? '#FFF' }}
-                  {...bindTouch(faceByPos.east.bit)}
+                  data-bit={faceByPos.east.bit}
                 >
                   {faceByPos.east.label}
                 </button>
@@ -276,7 +321,7 @@ export const MobileInlinePad: React.FC<Props> = ({ consoleId, onStateChange }) =
                 <button
                   className={`mobile-face-sm ${pressedMask & faceByPos.south.bit ? 'pressed' : ''}`}
                   style={{ background: faceByPos.south.color, color: faceByPos.south.textColor ?? '#FFF' }}
-                  {...bindTouch(faceByPos.south.bit)}
+                  data-bit={faceByPos.south.bit}
                 >
                   {faceByPos.south.label}
                 </button>

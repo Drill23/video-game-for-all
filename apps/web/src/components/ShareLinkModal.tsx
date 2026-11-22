@@ -1,5 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import QRCode from 'qrcode';
+import { Icon } from './Icon.js';
+import { useDialog } from './useDialog.js';
 
 interface Props {
   onClose: () => void;
@@ -11,6 +13,8 @@ export const ShareLinkModal: React.FC<Props> = ({ onClose }) => {
   const [error, setError] = useState<string | null>(null);
   const [qrPng, setQrPng] = useState<string>('');
   const [copied, setCopied] = useState(false);
+
+  useDialog(onClose);
 
   const PERMANENT_GH_PAGES_URL = 'https://drill23.github.io/video-game-for-all/';
   const isAlreadyPublic =
@@ -81,48 +85,46 @@ export const ShareLinkModal: React.FC<Props> = ({ onClose }) => {
 
   return (
     <div className="modal-backdrop" onClick={onClose}>
-      <div className="modal-card" style={{ maxWidth: 540 }} onClick={(e) => e.stopPropagation()}>
+      <div
+        className="modal-card"
+        style={{ maxWidth: 540 }}
+        role="dialog"
+        aria-modal="true"
+        aria-label="Link público"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="sheet-grabber" />
         <div className="modal-head">
-          <h3>🌐 Link Público Fixo (Sem Precisar do Mac Ligado!)</h3>
-          <button className="btn btn-sm btn-ghost" onClick={onClose}>
-            ✕
+          <h3>Link Público Fixo</h3>
+          <button className="icon-btn modal-close" onClick={onClose} aria-label="Fechar">
+            <Icon name="close" size={16} />
           </button>
         </div>
 
-        <p style={{ margin: '0 0 14px', fontSize: 13, color: 'var(--text-1)', lineHeight: 1.55 }}>
-          Envie o link permanente abaixo para qualquer pessoa (iPad, tablet Android, celular ou PC). Ele roda <strong>24h grátis para sempre no GitHub Pages</strong> — mesmo com o seu Mac completamente desligado!
+        <p className="lead">
+          Envie o link permanente abaixo para qualquer pessoa (iPad, tablet Android, celular ou PC). Ele roda <strong>24h grátis para sempre no GitHub Pages</strong>, mesmo com o seu Mac completamente desligado.
         </p>
 
-        <div
-          className="panel"
-          style={{
-            background: 'var(--bg-0)',
-            borderColor: 'var(--emerald)',
-            display: 'flex',
-            flexDirection: 'column',
-            alignItems: 'center',
-            gap: 12,
-            textAlign: 'center',
-            marginBottom: 14,
-          }}
-        >
-          <span className="badge" style={{ background: '#10b981', color: '#042f2e', borderColor: 'transparent' }}>
-            ● {status === 'running' && publicUrl ? 'Túnel Cloudflare Ativo' : 'Link Permanente 24/7 • Grátis para Sempre'}
+        <div className="qr-box" style={{ marginBottom: 14 }}>
+          <span className="badge pill-ok">
+            ● {status === 'running' && publicUrl ? 'Túnel Cloudflare Ativo' : 'Link permanente 24/7 • Grátis'}
           </span>
 
           {qrPng && (
             <img
+              className="qr-img"
               src={qrPng}
               alt="QR Code Link Público VGFA"
-              style={{ width: 185, height: 185, borderRadius: 12, background: '#fff', padding: 4 }}
+              width={185}
+              height={185}
             />
           )}
 
-          <div className="mono" style={{ fontSize: 13, color: 'var(--amber)', wordBreak: 'break-all', fontWeight: 700 }}>
+          <div className="mono" style={{ fontSize: 13, color: 'var(--accent)', wordBreak: 'break-all', fontWeight: 700 }}>
             {shareTargetUrl}
           </div>
 
-          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', justifyContent: 'center' }}>
+          <div className="hstack" style={{ justifyContent: 'center' }}>
             <button
               className="btn btn-primary"
               onClick={() => {
@@ -131,31 +133,31 @@ export const ShareLinkModal: React.FC<Props> = ({ onClose }) => {
                 setTimeout(() => setCopied(false), 2000);
               }}
             >
-              {copied ? '✓ Link Copiado!' : '📋 Copiar Link'}
+              {copied ? 'Link copiado' : 'Copiar link'}
             </button>
             <a className="btn btn-cyan" href={shareTargetUrl} target="_blank" rel="noreferrer">
-              Abrir Link ↗
+              Abrir link ↗
             </a>
             {status === 'running' && publicUrl && (
-              <button className="btn btn-ghost" style={{ color: '#fb7185' }} onClick={() => void handleStop()}>
-                Desligar Túnel Mac
+              <button className="btn btn-danger" onClick={() => void handleStop()}>
+                Desligar túnel do Mac
               </button>
             )}
           </div>
         </div>
 
         {!isAlreadyPublic && status !== 'running' && (
-          <div className="panel" style={{ background: 'var(--bg-0)', textAlign: 'center' }}>
-            <div style={{ fontSize: 12, color: 'var(--text-2)', marginBottom: 10 }}>
+          <div className="panel" style={{ textAlign: 'center' }}>
+            <div style={{ fontSize: 13, color: 'var(--text-1)', marginBottom: 10, lineHeight: 1.5 }}>
               Quer também compartilhar o <strong>servidor Hyper-Stream do seu Mac</strong> agora (para streaming instantâneo de 4 GB)?
             </div>
-            {error && <div style={{ color: '#fb7185', fontSize: 12, marginBottom: 10 }}>{error}</div>}
+            {error && <div className="notice notice-err">{error}</div>}
             <button
-              className="btn btn-sm btn-ghost"
+              className="btn btn-sm"
               disabled={status === 'starting'}
               onClick={() => void handleStart()}
             >
-              {status === 'starting' ? '⏳ Criando túnel Cloudflare...' : '⚡ Criar Túnel Temporário do Mac (Cloudflare)'}
+              {status === 'starting' ? 'Criando túnel Cloudflare...' : 'Criar túnel temporário do Mac (Cloudflare)'}
             </button>
           </div>
         )}

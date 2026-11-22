@@ -1,6 +1,6 @@
 import { PAD_BIT, type ConsoleId, type PadState } from '@vgfa/pad';
 import { CONSOLE_MAP } from './consoles.js';
-import { buildProxyStreamUrl } from './archive-search.js';
+import { downloadToLibrary, markPlayed, readLibraryFile, type LibraryMeta } from './rom-library.js';
 
 /**
  * Mapeamento oficial de teclas padrão do EmulatorJS / RetroArch:
@@ -30,6 +30,77 @@ const PAD_KEY_BINDINGS: Array<{
   { bit: PAD_BIT.R2, ejsIndex: 13, key: 't', code: 'KeyT', keyCode: 84 },
 ];
 
+/** Converte o estado do controle numa máscara de botões (opcionalmente analógico → direcional). */
+export function padStateToMask(state: PadState, stickToDpad = true): number {
+  let mask = state.buttons & 0xffff;
+  if (stickToDpad) {
+    if (state.lx < -0.4) mask |= PAD_BIT.LEFT;
+    if (state.lx > 0.4) mask |= PAD_BIT.RIGHT;
+    if (state.ly < -0.4) mask |= PAD_BIT.UP;
+    if (state.ly > 0.4) mask |= PAD_BIT.DOWN;
+  }
+  return mask;
+}
+
+/** Consoles cujo analógico vai direto para o core (Mario 64, PSP, PS1 DualShock). */
+export const EJS_ANALOG_CONSOLES: ReadonlySet<ConsoleId> = new Set<ConsoleId>(['n64', 'ps1', 'psp']);
+
+function round2(v: number): number {
+  if (!Number.isFinite(v)) return 0;
+  return Math.round(Math.max(-1, Math.min(1, v)) * 100) / 100;
+}
+
+/**
+ * Ponte de controle VGFA → EmulatorJS (v0.7).
+ *
+ * Antes: cada aperto virava UM evento solto; se o emulador ainda não estava pronto
+ * (ou o evento se perdia), o botão ficava "morto" até mudar de novo — o famoso
+ * "funcionou na tela inicial e depois parou". Agora mandamos o ESTADO COMPLETO dos
+ * 4 jogadores, o iframe compara com o que já aplicou e corrige sozinho, e quando
+ * o jogo de fato começa tudo é reaplicado.
+ */
+export class EjsInputBridge {
+  private readonly last: string[] = ['', '', '', ''];
+  private lastPostAt = 0;
+
+  constructor(private readonly consoleId: ConsoleId) {}
+
+  sync(states: ReadonlyArray<PadState | null | undefined>, iframe: HTMLIFrameElement | null): void {
+    const win = iframe?.contentWindow;
+    if (!win) return;
+    const analog = EJS_ANALOG_CONSOLES.has(this.consoleId);
+    const stickToDpad = this.consoleId !== 'n64' && this.consoleId !== 'psp';
+    const now = Date.now();
+    let changed = false;
+    const players: Array<{ mask: number; axes: number[] }> = [];
+    for (let p = 0; p < 4; p++) {
+      const s = states[p];
+      const mask = s ? padStateToMask(s, stickToDpad) : 0;
+      const axes = analog && s ? [round2(s.lx), round2(s.ly), round2(s.rx), round2(s.ry)] : [0, 0, 0, 0];
+      const key = `${mask}:${axes.join(',')}`;
+      if (key !== this.last[p]) {
+        this.last[p] = key;
+        changed = true;
+      }
+      players.push({ mask, axes });
+    }
+    if (!changed && now - this.lastPostAt < 250) return;
+    this.lastPostAt = now;
+    try {
+      win.postMessage({ type: 'vgfa-pad-sync', players }, '*');
+    } catch {
+      // iframe sendo recriado
+    }
+  }
+
+  /** Solta tudo (ex.: ao sair do jogo). */
+  releaseAll(iframe: HTMLIFrameElement | null): void {
+    this.last.fill('');
+    this.sync([null, null, null, null], iframe);
+  }
+}
+
+/** @deprecated use EjsInputBridge (mantido por compatibilidade). */
 export class RetroPadKeyBridge {
   private prevMask = 0;
 
@@ -121,133 +192,42 @@ export interface DownloadProgress {
   fromCache?: boolean;
 }
 
-// ==================== Cache Local Rápido de ROMs em IndexedDB (<= 64 MB) ====================
-const ROM_CACHE_DB = 'vgfa_rom_cache_v1';
-const ROM_CACHE_STORE = 'roms';
-const MAX_CACHEABLE_ROM_BYTES = 64 * 1024 * 1024;
-
-function openRomCacheDb(): Promise<IDBDatabase | null> {
-  if (typeof indexedDB === 'undefined') return Promise.resolve(null);
-  return new Promise((resolve) => {
-    try {
-      const req = indexedDB.open(ROM_CACHE_DB, 1);
-      req.onupgradeneeded = () => {
-        if (!req.result.objectStoreNames.contains(ROM_CACHE_STORE)) {
-          req.result.createObjectStore(ROM_CACHE_STORE);
-        }
-      };
-      req.onsuccess = () => resolve(req.result);
-      req.onerror = () => resolve(null);
-    } catch {
-      resolve(null);
-    }
-  });
-}
-
-async function getCachedRom(key: string): Promise<Uint8Array | null> {
-  const db = await openRomCacheDb();
-  if (!db) return null;
-  return new Promise((resolve) => {
-    try {
-      const tx = db.transaction(ROM_CACHE_STORE, 'readonly');
-      const req = tx.objectStore(ROM_CACHE_STORE).get(key);
-      req.onsuccess = () => resolve((req.result as Uint8Array | undefined) ?? null);
-      req.onerror = () => resolve(null);
-    } catch {
-      resolve(null);
-    }
-  });
-}
-
-async function putCachedRom(key: string, bytes: Uint8Array): Promise<void> {
-  if (bytes.byteLength > MAX_CACHEABLE_ROM_BYTES) return;
-  const db = await openRomCacheDb();
-  if (!db) return;
-  await new Promise<void>((resolve) => {
-    try {
-      const tx = db.transaction(ROM_CACHE_STORE, 'readwrite');
-      tx.objectStore(ROM_CACHE_STORE).put(bytes, key);
-      tx.oncomplete = () => resolve();
-      tx.onerror = () => resolve();
-    } catch {
-      resolve();
-    }
-  });
-}
+// ==================== Biblioteca local ("Minha Central") ====================
+// O cache antigo (vgfa_rom_cache_v1) foi aposentado: rom-library.ts migra sozinho
+// o que houver nele na primeira leitura.
 
 /**
- * Baixa uma ROM remota via Proxy CORS-Free com barra de progresso real e Cache IndexedDB.
- * Da 2ª vez que o usuário abrir o mesmo jogo, carrega em < 200 ms sem baixar de novo!
+ * Entrega uma ROM como File. Se já está na biblioteca do aparelho, abre na hora sem baixar;
+ * senão baixa (proxy CORS-Free, com progresso real) e guarda na biblioteca em pedaços.
+ * Se não der para guardar (cota cheia, Safari privado), o jogo roda mesmo assim, só na memória.
  */
 export async function fetchRomAsFile(
   url: string,
   filename: string,
   onProgress?: (p: DownloadProgress) => void,
   signal?: AbortSignal,
+  meta?: LibraryMeta,
 ): Promise<File> {
-  const cached = await getCachedRom(url);
-  if (cached && cached.byteLength > 0) {
+  const cached = await readLibraryFile(url);
+  if (cached && cached.size > 0) {
     onProgress?.({
-      loadedBytes: cached.byteLength,
-      totalBytes: cached.byteLength,
+      loadedBytes: cached.size,
+      totalBytes: cached.size,
       percent: 100,
       fromCache: true,
     });
-    const copy = new Uint8Array(cached.byteLength);
-    copy.set(cached);
-    return new File([copy], filename, { type: 'application/octet-stream' });
+    void markPlayed(url, meta);
+    return cached;
   }
 
-  const fetchUrl =
-    url.startsWith('http://') || url.startsWith('https://')
-      ? buildProxyStreamUrl(url)
-      : url;
-
-  const res = await globalThis.fetch(fetchUrl, { signal });
-  if (!res.ok) {
-    let detail = `Erro HTTP ${res.status}`;
-    try {
-      const errJson = (await res.json()) as { error?: string };
-      if (errJson.error) detail = errJson.error;
-    } catch {
-      // ignora
-    }
-    throw new Error(detail);
-  }
-
-  const totalBytes = Number(res.headers.get('content-length') || 0);
-  if (!res.body) {
-    const ab = await res.arrayBuffer();
-    const bytes = new Uint8Array(ab);
-    void putCachedRom(url, bytes);
-    onProgress?.({ loadedBytes: bytes.byteLength, totalBytes: bytes.byteLength, percent: 100 });
-    return new File([bytes], filename, { type: 'application/octet-stream' });
-  }
-
-  const reader = res.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let loadedBytes = 0;
-
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    if (value) {
-      chunks.push(value);
-      loadedBytes += value.byteLength;
-      const percent = totalBytes > 0 ? Math.min(100, Math.round((loadedBytes / totalBytes) * 100)) : 50;
-      onProgress?.({ loadedBytes, totalBytes, percent });
-    }
-  }
-
-  const merged = new Uint8Array(loadedBytes);
-  let pos = 0;
-  for (const c of chunks) {
-    merged.set(c, pos);
-    pos += c.byteLength;
-  }
-  void putCachedRom(url, merged);
-  onProgress?.({ loadedBytes, totalBytes: loadedBytes, percent: 100 });
-  return new File([merged], filename, { type: 'application/octet-stream' });
+  const file = await downloadToLibrary(url, filename, {
+    onProgress,
+    signal,
+    meta,
+    fallbackToMemory: true,
+  });
+  onProgress?.({ loadedBytes: file.size, totalBytes: file.size, percent: 100 });
+  return file;
 }
 
 export interface RetroWasmSession {
@@ -364,27 +344,83 @@ export function buildEmulatorJsSrcDoc(params: {
       cacheManager: false
     };
 
-    // Ponte VGFA-Pad: recebe inputs do Celular via QR Code em tempo real!
-    window.addEventListener('message', function(ev) {
-      var d = ev.data;
-      if (!d || d.type !== 'vgfa-pad-input') return;
-      try {
-        if (window.EJS_emulator && window.EJS_emulator.gameManager && typeof window.EJS_emulator.gameManager.simulateInput === 'function') {
-          window.EJS_emulator.gameManager.simulateInput(d.player || 0, d.ejsIndex, d.down ? 1 : 0);
-          return;
+    // Ponte VGFA-Pad v0.7: estado completo por jogador, reaplicado quando o jogo começa.
+    (function () {
+      // [bit VGFA, índice RetroPad do EmulatorJS]
+      var MAP = [[16,0],[64,1],[4096,2],[8192,3],[1,4],[2,5],[4,6],[8,7],[32,8],[128,9],[256,10],[512,11],[1024,12],[2048,13],[16384,14],[32768,15]];
+      // eixos: [positivo, negativo] -> LX, LY, RX, RY
+      var AXES = [[16,17],[18,19],[20,21],[22,23]];
+      function blank() { return { mask: 0, axes: [0, 0, 0, 0] }; }
+      var target = [blank(), blank(), blank(), blank()];
+      var applied = [blank(), blank(), blank(), blank()];
+      var wasReady = false;
+      var lastSyncAt = 0;
+      function manager() {
+        var e = window.EJS_emulator;
+        if (!e || !e.gameManager || typeof e.gameManager.simulateInput !== 'function') return null;
+        if (e.started === false) return null;
+        return e.gameManager;
+      }
+      function apply() {
+        var g = manager();
+        if (!g) { wasReady = false; return; }
+        if (!wasReady) {
+          // Jogo acabou de começar: reaplica tudo do zero
+          wasReady = true;
+          applied = [blank(), blank(), blank(), blank()];
         }
-      } catch (e) {}
-      var keyEv = new KeyboardEvent(d.down ? 'keydown' : 'keyup', {
-        key: d.key,
-        code: d.code,
-        keyCode: d.keyCode,
-        which: d.keyCode,
-        bubbles: true,
-        cancelable: true
+        for (var p = 0; p < 4; p++) {
+          var t = target[p], a = applied[p];
+          var diff = (t.mask ^ a.mask) & 0xffff;
+          try {
+            if (diff) {
+              for (var i = 0; i < MAP.length; i++) {
+                var bit = MAP[i][0];
+                if (diff & bit) g.simulateInput(p, MAP[i][1], (t.mask & bit) ? 1 : 0);
+              }
+            }
+            for (var x = 0; x < 4; x++) {
+              var v = t.axes[x] || 0;
+              if (v === (a.axes[x] || 0)) continue;
+              var pos = AXES[x][0], neg = AXES[x][1];
+              if (v > 0) { g.simulateInput(p, pos, Math.round(v * 32767)); g.simulateInput(p, neg, 0); }
+              else if (v < 0) { g.simulateInput(p, neg, Math.round(-v * 32767)); g.simulateInput(p, pos, 0); }
+              else { g.simulateInput(p, pos, 0); g.simulateInput(p, neg, 0); }
+            }
+            applied[p] = { mask: t.mask, axes: t.axes.slice() };
+          } catch (err) {}
+        }
+      }
+      window.addEventListener('message', function (ev) {
+        var d = ev.data;
+        if (!d) return;
+        if (d.type === 'vgfa-pad-sync' && d.players) {
+          for (var p = 0; p < 4; p++) {
+            var s = d.players[p];
+            target[p] = s ? { mask: (s.mask | 0) & 0xffff, axes: (s.axes || [0, 0, 0, 0]).slice(0, 4) } : blank();
+          }
+          lastSyncAt = Date.now();
+          apply();
+        } else if (d.type === 'vgfa-pad-input') {
+          // compatibilidade com a ponte antiga (um evento por botão)
+          var pl = (d.player | 0) & 3;
+          for (var j = 0; j < MAP.length; j++) {
+            if (MAP[j][1] === d.ejsIndex) {
+              target[pl] = { mask: d.down ? (target[pl].mask | MAP[j][0]) : (target[pl].mask & ~MAP[j][0]), axes: target[pl].axes };
+            }
+          }
+          apply();
+        }
       });
-      window.dispatchEvent(keyEv);
-      document.dispatchEvent(keyEv);
-    });
+      setInterval(function () {
+        // A página principal manda o estado a cada 250 ms; se parar, solta os botões
+        if (lastSyncAt && Date.now() - lastSyncAt > 2000) {
+          target = [blank(), blank(), blank(), blank()];
+          lastSyncAt = 0;
+        }
+        apply();
+      }, 100);
+    })();
   </script>
   <script src="https://cdn.emulatorjs.org/stable/data/loader.js"></script>
 </body>

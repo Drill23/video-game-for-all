@@ -12,7 +12,7 @@ import {
 } from '@vgfa/pad';
 import {
   CONSOLE_MAP,
-  RetroPadKeyBridge,
+  EjsInputBridge,
   VgfaBuiltinArcadeEngine,
   buildEmulatorJsSrcDoc,
   fetchRomAsFile,
@@ -21,10 +21,14 @@ import {
 } from '@vgfa/runtime';
 import type { VgfaSaveStore } from '@vgfa/storage';
 import type { Dictionary } from '../i18n/translations.js';
+import { Cover } from '../components/Cover.js';
+import { Icon } from '../components/Icon.js';
+import { padKindLabel } from '../components/padKind.js';
 import { Ps2LabPanel } from '../components/Ps2LabPanel.js';
 import { QrConnectModal } from '../components/QrConnectModal.js';
 import { MobileInlinePad } from '../components/MobileInlinePad.js';
 import { VgfaCastHost } from '../services/vgfa-cast.js';
+import '../styles/player.css';
 
 function detectMobileDevice(): boolean {
   if (typeof window === 'undefined') return false;
@@ -37,9 +41,30 @@ function detectMobileDevice(): boolean {
 }
 
 function getSignalingUrl(): string {
+  // GitHub Pages (e outros sites estáticos) não têm servidor /ws: vai direto para o VGFA Link sem servidor
+  if (/\.github\.io$/i.test(window.location.hostname)) return 'serverless';
   const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
   // Usa /ws na mesma origem/porta — funciona em localhost, LAN e qualquer link HTTPS público (4G/5G)!
   return `${proto}//${window.location.host}/ws`;
+}
+
+/** Junta dois controles no mesmo jogador (botões somados, maior inclinação do analógico vence). */
+function mergePadStates(a: PadState | null | undefined, b: PadState | null | undefined): PadState | null {
+  if (!a) return b ? { ...b } : null;
+  if (!b) return { ...a };
+  const pick = (x: number, y: number) => (Math.abs(y) > Math.abs(x) ? y : x);
+  return {
+    ...a,
+    buttons: a.buttons | b.buttons,
+    lx: pick(a.lx, b.lx),
+    ly: pick(a.ly, b.ly),
+    rx: pick(a.rx, b.rx),
+    ry: pick(a.ry, b.ry),
+    l2Pressure: Math.max(a.l2Pressure, b.l2Pressure),
+    r2Pressure: Math.max(a.r2Pressure, b.r2Pressure),
+    crossPressure: Math.max(a.crossPressure, b.crossPressure),
+    squarePressure: Math.max(a.squarePressure, b.squarePressure),
+  };
 }
 
 export type PlayerMode = 'emulatorjs-rom' | 'ps2-webgpu-lab' | 'builtin-arcade';
@@ -77,7 +102,11 @@ export const PlayerView: React.FC<Props> = ({ t, session, userId, saveStore, onB
   const builtinRef = useRef<VgfaBuiltinArcadeEngine | null>(null);
   const hostRef = useRef<RemotePadHost | null>(null);
   const btAdapterRef = useRef(new BluetoothGamepadAdapter());
-  const keyBridgeRef = useRef(new RetroPadKeyBridge());
+  const ejsBridgeRef = useRef<EjsInputBridge | null>(null);
+  if (!ejsBridgeRef.current) ejsBridgeRef.current = new EjsInputBridge(session.consoleId);
+  const castPadStateRef = useRef<PadState | null>(null);
+  const castPadAtRef = useRef(0);
+  const livePadKeyRef = useRef('');
   const keyboardMaskRef = useRef(0);
 
   // ETAPA PRÉ-JOGO: pede para conectar Celular (QR Code) ou Bluetooth ANTES de iniciar!
@@ -120,6 +149,39 @@ export const PlayerView: React.FC<Props> = ({ t, session, userId, saveStore, onB
 
   const inlinePadStateRef = useRef<PadState>(createEmptyPadState(0));
 
+  /**
+   * Envia o estado de TODOS os jogadores para o EmulatorJS (nível, não evento):
+   * P1 = celular P1 + controle de toque desta tela + amigo do VGFA-Cast; P2..P4 = demais celulares.
+   */
+  const pumpEjsInput = useCallback(() => {
+    if (session.mode !== 'emulatorjs-rom') return;
+    const host = hostRef.current;
+    const states: Array<PadState | null> = [null, null, null, null];
+    for (let s = 0; s < 4; s++) states[s] = host?.getLatestState(s) ?? null;
+    let p1 = mergePadStates(states[0], inlinePadStateRef.current);
+    if (castPadStateRef.current && Date.now() - castPadAtRef.current < 2500) {
+      p1 = mergePadStates(p1, castPadStateRef.current);
+    }
+    states[0] = p1;
+    ejsBridgeRef.current?.sync(states, iframeRef.current);
+  }, [session.mode]);
+  const pumpEjsInputRef = useRef(pumpEjsInput);
+  pumpEjsInputRef.current = pumpEjsInput;
+
+  /** Só o PS2 precisa do estado em React; e só re-renderiza quando algo muda de verdade. */
+  const publishLivePad = useCallback(
+    (state: PadState) => {
+      if (session.mode !== 'ps2-webgpu-lab') return;
+      const key = `${state.buttons}|${state.lx.toFixed(2)}|${state.ly.toFixed(2)}|${state.rx.toFixed(2)}|${state.ry.toFixed(2)}|${state.l2Pressure.toFixed(2)}|${state.r2Pressure.toFixed(2)}`;
+      if (key === livePadKeyRef.current) return;
+      livePadKeyRef.current = key;
+      setLivePhonePad(state);
+    },
+    [session.mode],
+  );
+  const publishLivePadRef = useRef(publishLivePad);
+  publishLivePadRef.current = publishLivePad;
+
   useEffect(() => {
     const onResize = () => {
       const mob = detectMobileDevice();
@@ -132,12 +194,10 @@ export const PlayerView: React.FC<Props> = ({ t, session, userId, saveStore, onB
   const handleInlineMobilePad = useCallback(
     (state: PadState) => {
       inlinePadStateRef.current = state;
-      setLivePhonePad(state);
-      if (session.mode === 'emulatorjs-rom') {
-        keyBridgeRef.current.pushToIframe(state, iframeRef.current);
-      }
+      publishLivePadRef.current(state);
+      pumpEjsInputRef.current();
     },
-    [session.mode],
+    [],
   );
 
   // Inicia / encerra VGFA-Cast WebRTC 60 FPS para amigo
@@ -207,11 +267,10 @@ export const PlayerView: React.FC<Props> = ({ t, session, userId, saveStore, onB
       },
       onViewersChanged: (count) => setCastViewers(count),
       onPadInput: (state) => {
-        inlinePadStateRef.current = state;
-        setLivePhonePad(state);
-        if (session.mode === 'emulatorjs-rom') {
-          keyBridgeRef.current.pushToIframe(state, iframeRef.current);
-        }
+        castPadStateRef.current = state;
+        castPadAtRef.current = Date.now();
+        publishLivePadRef.current(state);
+        pumpEjsInputRef.current();
       },
       onError: (msg) => setCastError(msg),
     });
@@ -226,6 +285,12 @@ export const PlayerView: React.FC<Props> = ({ t, session, userId, saveStore, onB
     merged.buttons = keyboardMaskRef.current | inlinePadStateRef.current.buttons;
     merged.lx = inlinePadStateRef.current.lx;
     merged.ly = inlinePadStateRef.current.ly;
+    const cast = castPadStateRef.current;
+    if (cast && Date.now() - castPadAtRef.current < 2500) {
+      merged.buttons |= cast.buttons;
+      if (Math.abs(cast.lx) > Math.abs(merged.lx)) merged.lx = cast.lx;
+      if (Math.abs(cast.ly) > Math.abs(merged.ly)) merged.ly = cast.ly;
+    }
 
     const bt0 = btAdapterRef.current.pollAll().get(0);
     if (bt0) {
@@ -258,10 +323,8 @@ export const PlayerView: React.FC<Props> = ({ t, session, userId, saveStore, onB
       onRoomCreated: (code) => setRoomCode(code),
       onPadsChanged: (pads) => setRemotePads(pads),
       onPadInput: (state) => {
-        setLivePhonePad(state);
-        if (session.mode === 'emulatorjs-rom') {
-          keyBridgeRef.current.pushToIframe(state, iframeRef.current);
-        }
+        if (state.slot === 0) publishLivePadRef.current(state);
+        pumpEjsInputRef.current();
       },
     });
     hostRef.current = host;
@@ -324,9 +387,15 @@ export const PlayerView: React.FC<Props> = ({ t, session, userId, saveStore, onB
     window.addEventListener('keydown', onKeyDown);
     window.addEventListener('keyup', onKeyUp);
 
+    let lastBtKey = '';
     const timer = setInterval(() => {
-      setBtPads(btAdapterRef.current.listConnected());
-    }, 250);
+      const list = btAdapterRef.current.listConnected();
+      const key = list.map((p) => `${p.id}:${p.label}`).join('|');
+      if (key !== lastBtKey) {
+        lastBtKey = key;
+        setBtPads(list);
+      }
+    }, 500);
 
     return () => {
       window.removeEventListener('keydown', onKeyDown);
@@ -334,6 +403,16 @@ export const PlayerView: React.FC<Props> = ({ t, session, userId, saveStore, onB
       clearInterval(timer);
     };
   }, [session.mode, started]);
+
+  // Bomba de entrada do EmulatorJS: 60x/s envia o estado de todos os jogadores (só posta quando muda)
+  useEffect(() => {
+    if (!started || session.mode !== 'emulatorjs-rom') return;
+    const timer = setInterval(() => pumpEjsInputRef.current(), 16);
+    return () => {
+      clearInterval(timer);
+      ejsBridgeRef.current?.releaseAll(iframeRef.current);
+    };
+  }, [started, session.mode]);
 
   // 2. Só inicia o motor de jogo APÓS o clique em "INICIAR JOGO AGORA" (desbloqueia áudio no Safari/Chrome!)
   useEffect(() => {
@@ -350,7 +429,13 @@ export const PlayerView: React.FC<Props> = ({ t, session, userId, saveStore, onB
         session.builtinVariant ?? 'neon-arena',
         {
           getInput: readMergedInput,
-          onHudUpdate: setHud,
+          // Evita re-renderizar a tela inteira 60x/s: só atualiza o HUD quando algo muda
+          onHudUpdate: (h) =>
+            setHud((prev) =>
+              prev.score === h.score && prev.lives === h.lives && prev.stage === h.stage && prev.fps === h.fps && prev.extra === h.extra
+                ? prev
+                : h,
+            ),
           onRumble: (cmd) => {
             btAdapterRef.current.rumble(cmd);
             hostRef.current?.sendRumble(cmd);
@@ -394,6 +479,12 @@ export const PlayerView: React.FC<Props> = ({ t, session, userId, saveStore, onB
                 }
               },
               controller.signal,
+              {
+                gameId: session.id,
+                title: session.title,
+                consoleId: session.consoleId,
+                coverUrl: session.coverUrl,
+              },
             );
           }
 
@@ -450,248 +541,203 @@ export const PlayerView: React.FC<Props> = ({ t, session, userId, saveStore, onB
   // ==================== TELA PRÉ-JOGO: CONECTAR CELULAR OU BLUETOOTH ====================
   if (!started) {
     return (
-      <div className="vgfa-shell" style={{ maxWidth: 960, paddingTop: 28 }}>
-        <div className="panel" style={{ padding: 26 }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20, flexWrap: 'wrap', gap: 10 }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
-              {session.coverUrl && (
-                <img
-                  src={session.coverUrl}
-                  alt={session.title}
-                  crossOrigin="anonymous"
-                  style={{ width: 58, height: 76, objectFit: 'cover', borderRadius: 10, border: '1px solid var(--border)' }}
-                />
-              )}
-              <div>
-                <span
-                  className="badge"
-                  style={{ background: consoleDef.accent, color: '#07080d', borderColor: 'transparent', marginBottom: 6 }}
-                >
+      <div className="pg">
+        <div className="pg-bg" aria-hidden="true">
+          {session.coverUrl && (
+            <img
+              src={session.coverUrl}
+              alt=""
+              crossOrigin="anonymous"
+              decoding="async"
+              onError={(e) => {
+                (e.currentTarget as HTMLImageElement).style.visibility = 'hidden';
+              }}
+            />
+          )}
+          <div className="pg-tint" style={{ ['--ph' as string]: consoleDef.accent }} />
+          <div className="pg-scrim" />
+        </div>
+
+        <div className="vgfa-shell pg-shell">
+          <div className="pg-top">
+            <button className="btn btn-sm" onClick={onBack}>
+              <Icon name="chevL" size={16} /> Voltar à Loja
+            </button>
+            <button
+              className="btn btn-sm btn-ghost"
+              onClick={() => {
+                const next = !isMobile;
+                setIsMobile(next);
+                setShowMobileTouchPad(next);
+              }}
+            >
+              {isMobile ? 'Usar QR Code (PC/TV)' : 'Modo Tela de Celular'}
+            </button>
+          </div>
+
+          <div className="pg-grid">
+            <div className="pg-hero">
+              <div className="pg-cover">
+                <Cover src={session.coverUrl} title={session.title} accent={consoleDef.accent} eager />
+                <span className="pg-gloss" />
+              </div>
+              <div className="pg-meta">
+                <span className="chip">
+                  <i className="dot" style={{ background: consoleDef.accent }} />
                   {consoleDef.name}
                 </span>
-                <h2 style={{ margin: 0, fontSize: 22 }}>{session.title}</h2>
-              </div>
-            </div>
-            <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-              <button
-                className="btn btn-sm btn-ghost"
-                onClick={() => {
-                  const next = !isMobile;
-                  setIsMobile(next);
-                  setShowMobileTouchPad(next);
-                }}
-              >
-                {isMobile ? '🖥️ Usar QR Code (PC/TV)' : '📱 Modo Tela de Celular'}
-              </button>
-              <button className="btn btn-sm btn-ghost" onClick={onBack}>
-                ← Voltar à Loja
-              </button>
-            </div>
-          </div>
-
-          <h3 style={{ margin: '0 0 6px', fontSize: 17 }}>
-            {isMobile ? 'Celular detectado — pronto para jogar!' : 'Antes de iniciar: conecte seu controle'}
-          </h3>
-          <p style={{ margin: '0 0 20px', fontSize: 13, color: 'var(--text-2)' }}>
-            {isMobile
-              ? `O VGFA adaptou automaticamente o controle virtual ${padProfile.title} para a tela do seu celular sem cobrir o jogo. Se preferir, conecte um controle Bluetooth.`
-              : `Escaneie o QR Code para transformar seu celular no controle ${padProfile.title}, ou aperte qualquer botão no seu controle Bluetooth.`}
-          </p>
-
-          {isMobile ? (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-              <div
-                className="panel"
-                style={{
-                  background: 'var(--bg-0)',
-                  borderColor: 'var(--emerald)',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'space-between',
-                  gap: 12,
-                  flexWrap: 'wrap',
-                }}
-              >
-                <div>
-                  <strong style={{ fontSize: 14, color: '#a7f3d0' }}>
-                    ✓ Controle Virtual na Tela ({padProfile.title})
-                  </strong>
-                  <div style={{ fontSize: 12, color: 'var(--text-2)', marginTop: 4 }}>
-                    Em pé: tela do jogo em cima e controle embaixo. Deitado: controles laterais translúcidos estilo PSP/Switch.
-                  </div>
-                </div>
-                <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12 }}>
-                  <input
-                    type="checkbox"
-                    checked={showMobileTouchPad}
-                    onChange={(e) => setShowMobileTouchPad(e.target.checked)}
-                  />
-                  Ativo
-                </label>
-              </div>
-
-              <div
-                className="panel"
-                style={{
-                  background: 'var(--bg-0)',
-                  borderColor: btPads.length > 0 ? 'var(--emerald)' : 'var(--border)',
-                }}
-              >
-                <strong style={{ fontSize: 14 }}>🎮 Controle Bluetooth no Celular</strong>
-                <div style={{ fontSize: 12, color: btPads.length > 0 ? '#a7f3d0' : 'var(--text-2)', marginTop: 4 }}>
-                  {btPads.length > 0
-                    ? `✓ Conectado: ${btPads[0].label} (pode desmarcar o controle na tela acima para tela 100% cheia!)`
-                    : 'Se tiver controle Bluetooth pareado no celular, aperte qualquer botão para ativar automaticamente.'}
-                </div>
-              </div>
-            </div>
-          ) : (
-            <div className="split-grid" style={{ marginTop: 0 }}>
-            {/* Card 1: Celular como Controle (QR Code direto na tela!) */}
-            <div
-              className="panel"
-              style={{
-                background: 'var(--bg-0)',
-                borderColor: remotePads.length > 0 ? 'var(--emerald)' : 'var(--border)',
-                display: 'flex',
-                flexDirection: 'column',
-                alignItems: 'center',
-                textAlign: 'center',
-                gap: 10,
-              }}
-            >
-              <strong style={{ fontSize: 15 }}>📱 Usar Celular como Controle</strong>
-
-              {qrDataUrl ? (
-                <img
-                  src={qrDataUrl}
-                  alt="QR Code Celular Controle"
-                  style={{ width: 176, height: 176, borderRadius: 12, background: '#fff', padding: 4 }}
-                />
-              ) : (
-                <div style={{ width: 176, height: 176, display: 'grid', placeItems: 'center', color: 'var(--text-2)', fontSize: 12 }}>
-                  Gerando QR Code...
-                </div>
-              )}
-
-              <div className="mono" style={{ fontSize: 20, fontWeight: 800, color: 'var(--amber)' }}>
-                {roomCode ?? '...'}
-              </div>
-
-              {remotePads.length > 0 ? (
-                <div
-                  style={{
-                    padding: '8px 14px',
-                    borderRadius: 10,
-                    background: 'rgba(52, 211, 153, 0.16)',
-                    color: '#a7f3d0',
-                    fontSize: 13,
-                    fontWeight: 700,
-                  }}
-                >
-                  ✓ {remotePads[0].label} Conectado! ({padProfile.title})
-                </div>
-              ) : (
-                <div style={{ fontSize: 12, color: 'var(--text-2)', lineHeight: 1.4 }}>
-                  Aponte a câmera do celular (no mesmo Wi-Fi) para o QR Code acima.
-                  <br />
-                  <a
-                    href={
-                      roomCode
-                        ? `${import.meta.env.BASE_URL}#/pad/${roomCode}`
-                        : `${import.meta.env.BASE_URL}#/pad`
-                    }
-                    target="_blank"
-                    rel="noreferrer"
-                    style={{ color: 'var(--cyan)', textDecoration: 'underline' }}
-                  >
-                    Ou testar controle em outra aba ↗
-                  </a>
-                </div>
-              )}
-              {padUrl && (
-                <div className="mono" style={{ fontSize: 10, color: 'var(--text-2)', wordBreak: 'break-all' }}>
-                  {padUrl}
-                </div>
-              )}
-            </div>
-
-            {/* Card 2: Controle Bluetooth / USB */}
-            <div
-              className="panel"
-              style={{
-                background: 'var(--bg-0)',
-                borderColor: btPads.length > 0 ? 'var(--emerald)' : 'var(--border)',
-                display: 'flex',
-                flexDirection: 'column',
-                justifyContent: 'space-between',
-                gap: 14,
-              }}
-            >
-              <div>
-                <strong style={{ display: 'block', fontSize: 15, marginBottom: 8 }}>
-                  🎮 Usar Controle Bluetooth / USB
-                </strong>
-                <p style={{ margin: '0 0 14px', fontSize: 13, color: 'var(--text-2)', lineHeight: 1.5 }}>
-                  Compatível com controles de <strong>PS4, PS5 DualSense, Xbox, 8BitDo</strong> e genéricos Bluetooth pareados no seu Mac/PC/Celular.
+                <h1 className="pg-title">{session.title}</h1>
+                <p className="pg-sub">
+                  {isMobile
+                    ? `O VGFA adaptou automaticamente o controle virtual ${padProfile.title} para a tela do seu celular sem cobrir o jogo. Se preferir, conecte um controle Bluetooth.`
+                    : `Escaneie o QR Code para transformar seu celular no controle ${padProfile.title}, ou aperte qualquer botão no seu controle Bluetooth.`}
                 </p>
-
-                {btPads.length > 0 ? (
-                  <div
-                    style={{
-                      padding: '12px 14px',
-                      borderRadius: 12,
-                      background: 'rgba(52, 211, 153, 0.16)',
-                      border: '1px solid rgba(52, 211, 153, 0.45)',
-                      color: '#a7f3d0',
-                      fontSize: 13,
-                      fontWeight: 700,
-                    }}
-                  >
-                    ✓ Controle Detectado: {btPads[0].label}
-                  </div>
-                ) : (
-                  <div
-                    style={{
-                      padding: '14px',
-                      borderRadius: 12,
-                      background: 'var(--bg-1)',
-                      border: '1px dashed var(--border)',
-                      fontSize: 13,
-                      color: 'var(--text-1)',
-                      textAlign: 'center',
-                    }}
-                  >
-                    Aperte qualquer botão no seu controle Bluetooth para conectar automaticamente...
-                  </div>
-                )}
-              </div>
-
-              <div
-                style={{
-                  padding: '12px 14px',
-                  borderRadius: 12,
-                  background: 'var(--bg-1)',
-                  fontSize: 12,
-                  color: 'var(--text-2)',
-                  lineHeight: 1.5,
-                }}
-              >
-                ⌨️ <strong>Sem controle agora?</strong> Você também pode jogar imediatamente usando o teclado (Setas + Z / X / A / S + Enter).
               </div>
             </div>
-          </div>
-          )}
 
-          {/* Botão Principal de Iniciar */}
-          <div style={{ marginTop: 22, display: 'flex', gap: 12, justifyContent: 'center', flexWrap: 'wrap' }}>
-            <button
-              className="btn btn-primary"
-              style={{ padding: '14px 36px', fontSize: 16, minWidth: 280 }}
-              onClick={() => setStarted(true)}
-            >
-              {hasAnyController ? '▶ INICIAR JOGO COM CONTROLE' : '▶ INICIAR JOGO AGORA'}
-            </button>
+            <div className="pg-side">
+              <h2 className="pg-kicker">
+                {isMobile ? 'Celular detectado, pronto para jogar' : 'Antes de iniciar: conecte seu controle'}
+              </h2>
+
+              {isMobile ? (
+                <>
+                  <div className={`pg-card glass ${showMobileTouchPad ? 'is-ok' : ''}`}>
+                    <div className="pg-card-head">
+                      <span className="pg-ico">
+                        <Icon name="gamepad" size={20} />
+                      </span>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <h3>Controle virtual na tela ({padProfile.title})</h3>
+                        <p>
+                          Em pé: tela do jogo em cima e controle embaixo. Deitado: controles laterais translúcidos estilo PSP/Switch.
+                        </p>
+                      </div>
+                    </div>
+                    <label className="pg-switch">
+                      <input
+                        type="checkbox"
+                        checked={showMobileTouchPad}
+                        onChange={(e) => setShowMobileTouchPad(e.target.checked)}
+                      />
+                      Ativo
+                    </label>
+                  </div>
+
+                  <div className={`pg-card glass ${btPads.length > 0 ? 'is-ok' : ''}`}>
+                    <div className="pg-card-head">
+                      <span className="pg-ico">
+                        <Icon name="gamepad" size={20} />
+                      </span>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <h3>Controle Bluetooth no celular</h3>
+                        <p>
+                          {btPads.length > 0
+                            ? `✓ Conectado: ${btPads[0].label}. Pode desmarcar o controle na tela acima para usar a tela 100% cheia.`
+                            : 'Se tiver controle Bluetooth pareado no celular, aperte qualquer botão para ativar automaticamente.'}
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+                </>
+              ) : (
+                <div className="pg-cards">
+                  {/* Card 1: Celular como Controle (QR Code direto na tela!) */}
+                  <div className={`pg-card glass ${remotePads.length > 0 ? 'is-ok' : ''}`}>
+                    <div className="pg-card-head">
+                      <span className="pg-ico">
+                        <Icon name="phone" size={20} />
+                      </span>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <h3>Celular como controle</h3>
+                        <p>Aponte a câmera (mesmo Wi-Fi) para o QR Code.</p>
+                      </div>
+                    </div>
+
+                    <div className="pg-qr-row">
+                      <div className="pg-qr">
+                        {qrDataUrl ? (
+                          <img src={qrDataUrl} alt="QR Code Celular Controle" width={176} height={176} />
+                        ) : (
+                          <div className="pg-qr-wait">Gerando QR Code...</div>
+                        )}
+                      </div>
+                      <div className="pg-code">
+                        <span className="pg-code-label">Código da sala</span>
+                        <span className="pg-code-val mono">{roomCode ?? '...'}</span>
+                        <a
+                          className="pg-link"
+                          href={
+                            roomCode
+                              ? `${import.meta.env.BASE_URL}#/pad/${roomCode}`
+                              : `${import.meta.env.BASE_URL}#/pad`
+                          }
+                          target="_blank"
+                          rel="noreferrer"
+                        >
+                          Ou testar controle em outra aba ↗
+                        </a>
+                      </div>
+                    </div>
+
+                    {remotePads.length > 0 ? (
+                      <div className="pg-status-list">
+                        {remotePads.map((p) => (
+                          <div key={p.id} className="pg-status is-ok">
+                            <i className="pulse-dot" />
+                            <span>
+                              ✓ {p.label} conectado · P{p.slot + 1} · {padKindLabel(p.kind)}
+                            </span>
+                          </div>
+                        ))}
+                        <div className="pg-hint">Controle {padProfile.title} ativo.</div>
+                      </div>
+                    ) : (
+                      <div className="pg-status">
+                        <i className="pulse-dot" />
+                        <span>Aguardando celular…</span>
+                      </div>
+                    )}
+                    {padUrl && <div className="mono pg-url">{padUrl}</div>}
+                  </div>
+
+                  {/* Card 2: Controle Bluetooth / USB */}
+                  <div className={`pg-card glass ${btPads.length > 0 ? 'is-ok' : ''}`}>
+                    <div className="pg-card-head">
+                      <span className="pg-ico">
+                        <Icon name="gamepad" size={20} />
+                      </span>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <h3>Controle Bluetooth / USB</h3>
+                        <p>
+                          PS4, PS5 DualSense, Xbox, 8BitDo e genéricos pareados no seu Mac, PC ou celular.
+                        </p>
+                      </div>
+                    </div>
+                    {btPads.length > 0 ? (
+                      <div className="pg-status is-ok">
+                        <i className="pulse-dot" />
+                        <span>✓ Controle detectado: {btPads[0].label}</span>
+                      </div>
+                    ) : (
+                      <div className="pg-status">
+                        <i className="pulse-dot" />
+                        <span>Aperte qualquer botão no controle para conectar…</span>
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="pg-keys">
+                    ⌨️ Sem controle agora? Jogue já com o teclado: Setas + Z / X / A / S + Enter.
+                  </div>
+                </div>
+              )}
+
+              {/* Botão Principal de Iniciar */}
+              <button className="btn btn-primary btn-lg pg-cta" onClick={() => setStarted(true)}>
+                <Icon name="play" size={18} /> {hasAnyController ? 'Jogar com controle' : 'Jogar agora'}
+              </button>
+            </div>
           </div>
         </div>
       </div>
@@ -703,15 +749,13 @@ export const PlayerView: React.FC<Props> = ({ t, session, userId, saveStore, onB
     return (
       <div className="mobile-player-shell">
         <div className="mobile-stage-bar">
-          <button className="btn btn-sm btn-ghost" onClick={onBack}>
+          <button className="btn btn-sm" onClick={onBack}>
             ← Sair
           </button>
-          <strong style={{ fontSize: 13, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-            {session.title}
-          </strong>
+          <strong className="mobile-title">{session.title}</strong>
           <div style={{ display: 'flex', gap: 6 }}>
             <button
-              className="btn btn-sm btn-ghost"
+              className="btn btn-sm"
               onClick={() => {
                 const el = stageWrapRef.current;
                 if (!el) return;
@@ -722,7 +766,7 @@ export const PlayerView: React.FC<Props> = ({ t, session, userId, saveStore, onB
               ⛶
             </button>
             <button
-              className="btn btn-sm btn-ghost"
+              className="btn btn-sm"
               onClick={() => setShowMobileTouchPad((v) => !v)}
             >
               {showMobileTouchPad ? '🎮 Ocultar' : '🎮 Pad'}
@@ -746,19 +790,8 @@ export const PlayerView: React.FC<Props> = ({ t, session, userId, saveStore, onB
           )}
 
           {bootStatus && (
-            <div
-              style={{
-                position: 'absolute',
-                inset: 0,
-                background: 'rgba(7, 8, 13, 0.92)',
-                display: 'flex',
-                flexDirection: 'column',
-                alignItems: 'center',
-                justifyContent: 'center',
-                padding: 20,
-                textAlign: 'center',
-              }}
-            >
+            <div className="boot-overlay">
+              <div className="glass-spinner" />
               <strong>{bootStatus}</strong>
               {progress && (
                 <div className="progress-track">
@@ -769,24 +802,14 @@ export const PlayerView: React.FC<Props> = ({ t, session, userId, saveStore, onB
           )}
 
           {bootError && (
-            <div
-              style={{
-                position: 'absolute',
-                inset: 0,
-                background: 'rgba(7, 8, 13, 0.95)',
-                display: 'flex',
-                flexDirection: 'column',
-                alignItems: 'center',
-                justifyContent: 'center',
-                padding: 20,
-                gap: 10,
-                textAlign: 'center',
-              }}
-            >
-              <div style={{ color: '#fb7185', fontWeight: 700 }}>{bootError}</div>
-              <button className="btn btn-sm btn-primary" onClick={onBack}>
-                ← Voltar
-              </button>
+            <div className="boot-overlay">
+              <div className="boot-error">
+                <strong>Não foi possível iniciar</strong>
+                <span>{bootError}</span>
+                <button className="btn btn-sm btn-primary" onClick={onBack}>
+                  ← Voltar
+                </button>
+              </div>
             </div>
           )}
         </div>
@@ -810,17 +833,18 @@ export const PlayerView: React.FC<Props> = ({ t, session, userId, saveStore, onB
 
   // ==================== TELA DE JOGO LIMPA EM 60 FPS (DESKTOP / TV) ====================
   return (
-    <div className="vgfa-shell" style={{ maxWidth: showAdvanced ? 1360 : 1080 }}>
+    <div className="vgfa-shell player-shell" style={{ maxWidth: showAdvanced ? 1360 : 1080 }}>
       <div style={{ marginTop: 18 }}>
         <div className="stage-box" ref={stageWrapRef}>
           <div className="stage-bar">
-            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-              <button className="btn btn-sm btn-ghost" onClick={onBack}>
+            <div className="sb-left">
+              <button className="btn btn-sm" onClick={onBack}>
                 ← {t.backHome}
               </button>
-              <div>
-                <div style={{ fontWeight: 800, fontSize: 15 }}>{session.title}</div>
-                <div style={{ fontSize: 11, color: 'var(--text-2)' }}>
+              <div className="sb-title">
+                <div className="sb-name">{session.title}</div>
+                <div className="sb-sub">
+                  <i className={`sb-dot ${hasAnyController ? 'is-ok' : ''}`} />
                   {consoleDef.name} •{' '}
                   {remotePads.length > 0
                     ? `📱 ${remotePads.length} Celular conectado`
@@ -831,9 +855,9 @@ export const PlayerView: React.FC<Props> = ({ t, session, userId, saveStore, onB
               </div>
             </div>
 
-            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+            <div className="sb-actions">
               <button className="btn btn-sm btn-primary" onClick={() => setShowQrModal(true)}>
-                📱 QR Controle {roomCode ? `(${roomCode})` : ''}
+                <Icon name="phone" size={15} /> QR Controle {roomCode ? `(${roomCode})` : ''}
               </button>
               <button
                 className={`btn btn-sm ${castCode ? 'btn-primary' : 'btn-cyan'}`}
@@ -844,12 +868,12 @@ export const PlayerView: React.FC<Props> = ({ t, session, userId, saveStore, onB
               >
                 📡 {castCode ? `Transmitindo (${castViewers})` : 'Transmitir 60 FPS'}
               </button>
-              <button className="btn btn-sm btn-ghost" onClick={toggleFullscreen}>
+              <button className="btn btn-sm" onClick={toggleFullscreen}>
                 ⛶ Tela Cheia
               </button>
               {session.mode === 'builtin-arcade' && (
                 <button className="btn btn-sm btn-cyan" onClick={() => void handleSaveBuiltin()}>
-                  💾 Salvar
+                  <Icon name="save" size={15} /> Salvar
                 </button>
               )}
               <button className="btn btn-sm btn-ghost" onClick={() => setShowAdvanced((v) => !v)}>
@@ -858,11 +882,7 @@ export const PlayerView: React.FC<Props> = ({ t, session, userId, saveStore, onB
             </div>
           </div>
 
-          {toast && (
-            <div style={{ padding: '8px 16px', background: 'rgba(52, 211, 153, 0.16)', color: '#a7f3d0', fontSize: 12 }}>
-              {toast}
-            </div>
-          )}
+          {toast && <div className="stage-toast">{toast}</div>}
 
           {session.mode === 'ps2-webgpu-lab' ? (
             <Ps2LabPanel
@@ -893,26 +913,15 @@ export const PlayerView: React.FC<Props> = ({ t, session, userId, saveStore, onB
               )}
 
               {bootStatus && (
-                <div
-                  style={{
-                    position: 'absolute',
-                    inset: 0,
-                    background: 'rgba(7, 8, 13, 0.92)',
-                    display: 'flex',
-                    flexDirection: 'column',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    padding: 24,
-                    textAlign: 'center',
-                  }}
-                >
+                <div className="boot-overlay">
+                  <div className="glass-spinner" />
                   <strong style={{ fontSize: 16 }}>{bootStatus}</strong>
                   {progress && (
                     <>
                       <div className="progress-track">
                         <div className="progress-fill" style={{ width: `${progress.percent}%` }} />
                       </div>
-                      <span className="mono" style={{ fontSize: 12, color: 'var(--text-2)', marginTop: 8 }}>
+                      <span className="mono" style={{ fontSize: 12, color: 'var(--text-2)' }}>
                         {progress.percent}%
                       </span>
                     </>
@@ -921,27 +930,14 @@ export const PlayerView: React.FC<Props> = ({ t, session, userId, saveStore, onB
               )}
 
               {bootError && (
-                <div
-                  style={{
-                    position: 'absolute',
-                    inset: 0,
-                    background: 'rgba(7, 8, 13, 0.95)',
-                    display: 'flex',
-                    flexDirection: 'column',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    padding: 24,
-                    textAlign: 'center',
-                    gap: 12,
-                  }}
-                >
-                  <div style={{ color: '#fb7185', fontWeight: 700, fontSize: 15 }}>
-                    Não foi possível iniciar este arquivo
+                <div className="boot-overlay">
+                  <div className="boot-error">
+                    <strong>Não foi possível iniciar este arquivo</strong>
+                    <span>{bootError}</span>
+                    <button className="btn btn-primary" onClick={onBack}>
+                      ← Voltar para a Loja
+                    </button>
                   </div>
-                  <div style={{ color: 'var(--text-1)', fontSize: 13, maxWidth: 460 }}>{bootError}</div>
-                  <button className="btn btn-primary" onClick={onBack}>
-                    ← Voltar para a Loja
-                  </button>
                 </div>
               )}
             </div>
@@ -958,8 +954,8 @@ export const PlayerView: React.FC<Props> = ({ t, session, userId, saveStore, onB
         </div>
 
         {showAdvanced && (
-          <div className="panel" style={{ marginTop: 14, display: 'flex', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12 }}>
-            <div style={{ fontSize: 12, color: 'var(--text-1)' }}>
+          <div className="panel player-info">
+            <div style={{ fontSize: 12.5, color: 'var(--text-1)' }}>
               <strong>Sala Celular:</strong> <span className="mono">{roomCode}</span> ({remotePads.length}/4 conectados) •{' '}
               <strong>Bluetooth:</strong> {btPads.length > 0 ? btPads.map((p) => p.label).join(', ') : 'Nenhum'}
             </div>
@@ -982,31 +978,45 @@ export const PlayerView: React.FC<Props> = ({ t, session, userId, saveStore, onB
 
       {showCastModal && (
         <div className="modal-backdrop" onClick={() => setShowCastModal(false)}>
-          <div className="modal-card" style={{ maxWidth: 480 }} onClick={(e) => e.stopPropagation()}>
+          <div
+            className="modal-card"
+            style={{ maxWidth: 480 }}
+            role="dialog"
+            aria-modal="true"
+            aria-label="VGFA-Cast"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="sheet-grabber" />
             <div className="modal-head">
-              <h3>📡 VGFA-Cast — Cloud Gaming P2P (60 FPS)</h3>
-              <button className="btn btn-sm btn-ghost" onClick={() => setShowCastModal(false)}>
-                ✕
+              <h3>📡 VGFA-Cast · Jogo por streaming</h3>
+              <button
+                className="icon-btn modal-close"
+                onClick={() => setShowCastModal(false)}
+                aria-label="Fechar"
+              >
+                <Icon name="close" size={16} />
               </button>
             </div>
-            <p style={{ margin: '0 0 12px', fontSize: 13, color: 'var(--text-1)', lineHeight: 1.5 }}>
-              Envie o link abaixo para qualquer amigo (mesmo em um celular simples ou Safari). O jogo roda na sua GPU aqui e transmite vídeo <strong>60 FPS via WebRTC</strong> com <strong>0 MB baixados</strong> para ele jogar pelo controle virtual!
+            <p className="lead">
+              Envie o link abaixo para qualquer amigo (mesmo em um celular simples ou Safari). O jogo roda na sua GPU aqui e transmite vídeo <strong>60 FPS via WebRTC</strong> com <strong>0 MB baixados</strong> para ele jogar pelo controle virtual.
             </p>
-            {castError && (
-              <div style={{ padding: 10, borderRadius: 10, background: 'rgba(251, 113, 133, 0.14)', color: '#fda4af', fontSize: 12, marginBottom: 12 }}>
-                {castError}
-              </div>
-            )}
+            {castError && <div className="notice notice-warn">{castError}</div>}
             {castCode && (
-              <div className="panel" style={{ background: 'var(--bg-0)', textAlign: 'center', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 10 }}>
-                <span className="badge" style={{ background: '#10b981', color: '#042f2e', borderColor: 'transparent' }}>
-                  ● Ao Vivo • {castViewers} conectado(s)
+              <div className="qr-box">
+                <span className="live-pill">
+                  <i className="pulse-dot" /> Ao vivo · {castViewers} conectado(s)
                 </span>
-                {castQr && <img src={castQr} alt="QR VGFA-Cast" style={{ width: 175, height: 175, borderRadius: 12, background: '#fff', padding: 4 }} />}
-                <div className="mono" style={{ fontSize: 12, color: 'var(--amber)', wordBreak: 'break-all' }}>
-                  {castUrl || `/watch/${castCode}`}
-                </div>
-                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', justifyContent: 'center' }}>
+                {castQr && (
+                  <img className="qr-img" src={castQr} alt="QR VGFA-Cast" width={175} height={175} />
+                )}
+                <div className="copy-row">
+                  <input
+                    className="field mono"
+                    readOnly
+                    value={castUrl || `/watch/${castCode}`}
+                    onFocus={(e) => e.currentTarget.select()}
+                    aria-label="Link do amigo"
+                  />
                   <button
                     className="btn btn-sm btn-primary"
                     onClick={() => {
@@ -1014,19 +1024,18 @@ export const PlayerView: React.FC<Props> = ({ t, session, userId, saveStore, onB
                       showToast('Link VGFA-Cast copiado!');
                     }}
                   >
-                    📋 Copiar Link do Amigo
-                  </button>
-                  <button
-                    className="btn btn-sm btn-ghost"
-                    style={{ color: '#fb7185' }}
-                    onClick={() => {
-                      stopVgfaCast();
-                      setShowCastModal(false);
-                    }}
-                  >
-                    Encerrar Transmissão
+                    Copiar link
                   </button>
                 </div>
+                <button
+                  className="btn btn-sm btn-danger"
+                  onClick={() => {
+                    stopVgfaCast();
+                    setShowCastModal(false);
+                  }}
+                >
+                  Encerrar transmissão
+                </button>
               </div>
             )}
           </div>

@@ -4,10 +4,35 @@
     <meta charset="UTF-8" />
     <meta
       name="viewport"
-      content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"
+      content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover"
     />
-    <meta name="theme-color" content="#07080D" />
-    <title>VIDEO GAME FOR ALL — VGFA</title>
+    <meta name="theme-color" content="#08080E" media="(prefers-color-scheme: dark)" />
+    <meta name="theme-color" content="#ECEEF7" media="(prefers-color-scheme: light)" />
+    <meta name="color-scheme" content="dark light" />
+    <meta name="description" content="VGFA — Central de Jogos: clássicos do Atari ao PlayStation 2 no navegador, com o celular como controle." />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-title" content="VGFA" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <link rel="icon" type="image/svg+xml" href="/icons/icon.svg" />
+    <link rel="icon" type="image/png" sizes="192x192" href="/icons/icon-192.png" />
+    <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png" />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <title>VGFA — Central de Jogos</title>
+    <script>
+      // Tema e modo leve aplicados antes da primeira pintura (evita piscar)
+      (function () {
+        try {
+          var pref = localStorage.getItem('vgfa:theme');
+          if (pref !== 'system' && pref !== 'light' && pref !== 'dark') pref = 'dark';
+          var root = document.documentElement;
+          root.setAttribute('data-theme', pref);
+          var hc = navigator.hardwareConcurrency;
+          var dm = navigator.deviceMemory;
+          if ((hc && hc <= 4) || (dm && dm <= 4)) root.classList.add('perf-lite');
+        } catch (e) {}
+      })();
+    </script>
     <script>
       // VGFA Nexus Service Worker: ativa COOP/COEP (SharedArrayBuffer + WebGPU + Cache WASM)
       // automaticamente em hospedagem estática (GitHub Pages), com proteção contra loop de reload!

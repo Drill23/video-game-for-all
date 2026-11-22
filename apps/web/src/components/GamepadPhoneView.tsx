@@ -1,95 +1,70 @@
-import React, { useCallback, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   CONTROLLER_PROFILES,
   PAD_BIT,
+  type ButtonSpec,
   type ConsoleId,
   type PadState,
 } from '@vgfa/pad';
+import '../styles/pad.css';
+
+type PadInput = Omit<PadState, 'slot' | 'seq'>;
 
 interface Props {
   consoleId: ConsoleId;
   gameTitle: string;
   slot: number;
-  transport: 'webrtc' | 'ws' | 'preview';
+  transport: 'webrtc' | 'ws' | 'relay' | 'preview';
   rumbleActive: boolean;
-  onStateChange: (state: Omit<PadState, 'slot' | 'seq'>) => void;
+  onStateChange: (state: PadInput) => void;
   onConsolePreviewChange?: (consoleId: ConsoleId) => void;
+  onExit?: () => void;
+  /** aviso de conexão (ex.: aguardando a tela do jogo voltar) */
+  notice?: string | null;
 }
 
-interface StickProps {
-  label: string;
-  onMove: (x: number, y: number) => void;
-}
+type PointerRole =
+  | { kind: 'btn'; bit: number }
+  | { kind: 'dpad'; el: HTMLElement }
+  | { kind: 'stick'; which: 'l' | 'r'; el: HTMLElement };
 
-const VirtualAnalogStick: React.FC<StickProps> = ({ label, onMove }) => {
-  const baseRef = useRef<HTMLDivElement | null>(null);
-  const pointerIdRef = useRef<number | null>(null);
-  const [knob, setKnob] = useState({ x: 0, y: 0 });
-
-  const updateFromPointer = useCallback(
-    (clientX: number, clientY: number) => {
-      const el = baseRef.current;
-      if (!el) return;
-      const rect = el.getBoundingClientRect();
-      const cx = rect.left + rect.width / 2;
-      const cy = rect.top + rect.height / 2;
-      const maxR = rect.width * 0.36;
-      const dx = clientX - cx;
-      const dy = clientY - cy;
-      const dist = Math.hypot(dx, dy);
-      const scale = dist > maxR ? maxR / dist : 1;
-      const nx = (dx * scale) / maxR;
-      const ny = (dy * scale) / maxR;
-      setKnob({ x: dx * scale, y: dy * scale });
-      onMove(nx, ny);
-    },
-    [onMove],
-  );
-
-  const release = useCallback(() => {
-    pointerIdRef.current = null;
-    setKnob({ x: 0, y: 0 });
-    onMove(0, 0);
-  }, [onMove]);
-
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4 }}>
-      <div
-        ref={baseRef}
-        className="stick-base"
-        onPointerDown={(e) => {
-          e.preventDefault();
-          pointerIdRef.current = e.pointerId;
-          e.currentTarget.setPointerCapture(e.pointerId);
-          updateFromPointer(e.clientX, e.clientY);
-        }}
-        onPointerMove={(e) => {
-          if (pointerIdRef.current !== e.pointerId) return;
-          e.preventDefault();
-          updateFromPointer(e.clientX, e.clientY);
-        }}
-        onPointerUp={(e) => {
-          if (pointerIdRef.current !== e.pointerId) return;
-          release();
-        }}
-        onPointerCancel={release}
-      >
-        <div
-          className="stick-knob"
-          style={{
-            transform: `translate(calc(-50% + ${knob.x}px), calc(-50% + ${knob.y}px))`,
-          }}
-        />
-      </div>
-      <span style={{ fontSize: 10, color: 'var(--text-2)', fontWeight: 700 }}>{label}</span>
-    </div>
-  );
+const TRANSPORT_LABEL: Record<Props['transport'], { text: string; tone: string }> = {
+  webrtc: { text: 'Direto · WebRTC', tone: 'good' },
+  ws: { text: 'Wi-Fi local', tone: 'good' },
+  relay: { text: 'Pela internet', tone: 'warn' },
+  preview: { text: 'Pré-visualização', tone: 'idle' },
 };
 
+function dpadBitsFrom(el: HTMLElement, x: number, y: number): number {
+  const r = el.getBoundingClientRect();
+  const dx = x - (r.left + r.width / 2);
+  const dy = y - (r.top + r.height / 2);
+  const radius = Math.min(r.width, r.height) / 2;
+  if (Math.hypot(dx, dy) < radius * 0.18) return 0;
+  const angle = (Math.atan2(dy, dx) * 180) / Math.PI; // 0 = direita, 90 = baixo
+  let bits = 0;
+  if (angle > -67.5 && angle < 67.5) bits |= PAD_BIT.RIGHT;
+  if (angle > 22.5 && angle < 157.5) bits |= PAD_BIT.DOWN;
+  if (angle > 112.5 || angle < -112.5) bits |= PAD_BIT.LEFT;
+  if (angle > -157.5 && angle < -22.5) bits |= PAD_BIT.UP;
+  return bits;
+}
+
+function stickFrom(el: HTMLElement, x: number, y: number): { nx: number; ny: number; px: number; py: number } {
+  const r = el.getBoundingClientRect();
+  const maxR = r.width * 0.34;
+  const dx = x - (r.left + r.width / 2);
+  const dy = y - (r.top + r.height / 2);
+  const dist = Math.hypot(dx, dy) || 1;
+  const k = dist > maxR ? maxR / dist : 1;
+  return { nx: (dx * k) / maxR, ny: (dy * k) / maxR, px: dx * k, py: dy * k };
+}
+
 /**
- * Interface do Celular como Controle Adaptativo VGFA.
- * Muda automaticamente o layout de botões conforme o console rodando na tela principal
- * (Atari CX40, NES, SNES, Mega Drive, GBA, N64, PS1, PSP e PS2 DualShock 2 com pressão!).
+ * Controle do celular VGFA (v0.7).
+ * - Um único "motor de toque" na tela inteira: o dedo pode DESLIZAR de um botão para outro
+ *   (B→A no Mario), vários dedos ao mesmo tempo, direcional com diagonais.
+ * - O layout muda sozinho conforme o console que está rodando na tela principal.
  */
 export const GamepadPhoneView: React.FC<Props> = ({
   consoleId,
@@ -99,91 +74,280 @@ export const GamepadPhoneView: React.FC<Props> = ({
   rumbleActive,
   onStateChange,
   onConsolePreviewChange,
+  onExit,
+  notice,
 }) => {
   const profile = CONTROLLER_PROFILES[consoleId];
-  const stateRef = useRef<Omit<PadState, 'slot' | 'seq'>>({
-    buttons: 0,
-    lx: 0,
-    ly: 0,
-    rx: 0,
-    ry: 0,
-    l2Pressure: 0,
-    r2Pressure: 0,
-    crossPressure: 0,
-    squarePressure: 0,
-  });
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const knobL = useRef<HTMLDivElement | null>(null);
+  const knobR = useRef<HTMLDivElement | null>(null);
+  const pointers = useRef(new Map<number, PointerRole>());
+  const dpadBits = useRef(new Map<number, number>());
+  const sticks = useRef({ lx: 0, ly: 0, rx: 0, ry: 0 });
+  const lastSent = useRef('');
+  const lastMask = useRef(0);
   const [pressedMask, setPressedMask] = useState(0);
   const [pressureLevel, setPressureLevel] = useState(1);
-
-  const emit = useCallback(() => {
-    onStateChange({ ...stateRef.current });
-  }, [onStateChange]);
-
-  const setBit = useCallback(
-    (bit: number, down: boolean) => {
-      const next = down
-        ? stateRef.current.buttons | bit
-        : stateRef.current.buttons & ~bit;
-      stateRef.current.buttons = next;
-      if (bit === PAD_BIT.L2) stateRef.current.l2Pressure = down ? pressureLevel : 0;
-      if (bit === PAD_BIT.R2) stateRef.current.r2Pressure = down ? pressureLevel : 0;
-      if (bit === PAD_BIT.SOUTH) stateRef.current.crossPressure = down ? pressureLevel : 0;
-      if (bit === PAD_BIT.WEST) stateRef.current.squarePressure = down ? pressureLevel : 0;
-      setPressedMask(next);
-      emit();
-    },
-    [emit, pressureLevel],
+  const pressureRef = useRef(1);
+  pressureRef.current = pressureLevel;
+  const [haptics, setHaptics] = useState(() => {
+    try {
+      return localStorage.getItem('vgfa:pad-haptics') !== 'off';
+    } catch {
+      return true;
+    }
+  });
+  const hapticsRef = useRef(haptics);
+  hapticsRef.current = haptics;
+  const [syncToast, setSyncToast] = useState<string | null>(null);
+  const [canFullscreen] = useState(
+    () => typeof document !== 'undefined' && typeof document.documentElement.requestFullscreen === 'function',
   );
 
-  const bindTouch = (bit: number) => ({
-    onPointerDown: (e: React.PointerEvent<HTMLButtonElement>) => {
-      e.preventDefault();
-      e.currentTarget.setPointerCapture(e.pointerId);
-      setBit(bit, true);
-    },
-    onPointerUp: (e: React.PointerEvent<HTMLButtonElement>) => {
-      e.preventDefault();
-      setBit(bit, false);
-    },
-    onPointerCancel: () => setBit(bit, false),
-  });
+  // Aviso "controle sincronizado" quando o console da tela principal muda
+  const firstConsole = useRef(true);
+  useEffect(() => {
+    if (firstConsole.current) {
+      firstConsole.current = false;
+      setSyncToast(`Controle ${profile.title} pronto`);
+    } else {
+      setSyncToast(`Controle trocado para ${profile.title}`);
+    }
+    const t = setTimeout(() => setSyncToast(null), 2600);
+    return () => clearTimeout(t);
+  }, [profile.title]);
 
+  // Mantém a tela do celular acesa enquanto joga
+  useEffect(() => {
+    if (transport === 'preview') return;
+    let lock: { release: () => Promise<void> } | null = null;
+    const nav = navigator as Navigator & {
+      wakeLock?: { request: (t: 'screen') => Promise<{ release: () => Promise<void> }> };
+    };
+    const acquire = async () => {
+      try {
+        if (nav.wakeLock && document.visibilityState === 'visible') lock = await nav.wakeLock.request('screen');
+      } catch {
+        // sem suporte ou negado
+      }
+    };
+    void acquire();
+    const onVis = () => {
+      if (document.visibilityState === 'visible') void acquire();
+    };
+    document.addEventListener('visibilitychange', onVis);
+    return () => {
+      document.removeEventListener('visibilitychange', onVis);
+      void lock?.release().catch(() => {});
+    };
+  }, [transport]);
+
+  const publish = useCallback(() => {
+    let mask = 0;
+    for (const role of pointers.current.values()) if (role.kind === 'btn') mask |= role.bit;
+    for (const bits of dpadBits.current.values()) mask |= bits;
+    const p = pressureRef.current;
+    const s = sticks.current;
+    const state: PadInput = {
+      buttons: mask,
+      lx: s.lx,
+      ly: s.ly,
+      rx: s.rx,
+      ry: s.ry,
+      l2Pressure: mask & PAD_BIT.L2 ? p : 0,
+      r2Pressure: mask & PAD_BIT.R2 ? p : 0,
+      crossPressure: mask & PAD_BIT.SOUTH ? p : 0,
+      squarePressure: mask & PAD_BIT.WEST ? p : 0,
+    };
+    const key = `${mask}|${s.lx.toFixed(2)}|${s.ly.toFixed(2)}|${s.rx.toFixed(2)}|${s.ry.toFixed(2)}|${p}`;
+    if (key === lastSent.current) return;
+    lastSent.current = key;
+    const gained = mask & ~lastMask.current;
+    if (gained && hapticsRef.current && typeof navigator.vibrate === 'function') {
+      try {
+        navigator.vibrate(9);
+      } catch {}
+    }
+    if (mask !== lastMask.current) {
+      lastMask.current = mask;
+      setPressedMask(mask);
+    }
+    onStateChange(state);
+  }, [onStateChange]);
+
+  const setKnob = (which: 'l' | 'r', px: number, py: number) => {
+    const el = which === 'l' ? knobL.current : knobR.current;
+    if (el) el.style.transform = `translate(calc(-50% + ${px}px), calc(-50% + ${py}px))`;
+  };
+
+  const hitTest = (x: number, y: number): HTMLElement | null => {
+    const el = document.elementFromPoint(x, y) as HTMLElement | null;
+    return (el?.closest('[data-bit],[data-zone]') as HTMLElement | null) ?? null;
+  };
+
+  const applyPointer = (id: number, role: PointerRole, x: number, y: number) => {
+    if (role.kind === 'dpad') {
+      dpadBits.current.set(id, dpadBitsFrom(role.el, x, y));
+    } else if (role.kind === 'stick') {
+      const v = stickFrom(role.el, x, y);
+      if (role.which === 'l') {
+        sticks.current.lx = v.nx;
+        sticks.current.ly = v.ny;
+      } else {
+        sticks.current.rx = v.nx;
+        sticks.current.ry = v.ny;
+      }
+      setKnob(role.which, v.px, v.py);
+    }
+  };
+
+  const releasePointer = (id: number) => {
+    const role = pointers.current.get(id);
+    pointers.current.delete(id);
+    dpadBits.current.delete(id);
+    if (role?.kind === 'stick') {
+      if (role.which === 'l') {
+        sticks.current.lx = 0;
+        sticks.current.ly = 0;
+      } else {
+        sticks.current.rx = 0;
+        sticks.current.ry = 0;
+      }
+      setKnob(role.which, 0, 0);
+    }
+  };
+
+  const releaseEverything = useCallback(() => {
+    for (const id of Array.from(pointers.current.keys())) releasePointer(id);
+    publish();
+  }, [publish]);
+
+  const onPointerDown = (e: React.PointerEvent) => {
+    const target = hitTest(e.clientX, e.clientY);
+    if (!target) return;
+    if (target.dataset.noPad !== undefined) return; // controles da barra superior
+    e.preventDefault();
+    let role: PointerRole | null = null;
+    if (target.dataset.zone === 'dpad') role = { kind: 'dpad', el: target };
+    else if (target.dataset.zone === 'stick-l') role = { kind: 'stick', which: 'l', el: target };
+    else if (target.dataset.zone === 'stick-r') role = { kind: 'stick', which: 'r', el: target };
+    else if (target.dataset.bit) role = { kind: 'btn', bit: Number(target.dataset.bit) };
+    if (!role) return;
+    pointers.current.set(e.pointerId, role);
+    try {
+      rootRef.current?.setPointerCapture(e.pointerId);
+    } catch {}
+    applyPointer(e.pointerId, role, e.clientX, e.clientY);
+    publish();
+  };
+
+  const onPointerMove = (e: React.PointerEvent) => {
+    const role = pointers.current.get(e.pointerId);
+    if (!role) return;
+    e.preventDefault();
+    if (role.kind === 'btn') {
+      // Deslizar: troca de botão ao passar o dedo por cima de outro
+      const target = hitTest(e.clientX, e.clientY);
+      const bit = target?.dataset.bit ? Number(target.dataset.bit) : 0;
+      if (bit !== role.bit) {
+        if (bit) pointers.current.set(e.pointerId, { kind: 'btn', bit });
+        else pointers.current.set(e.pointerId, { kind: 'btn', bit: 0 });
+      }
+    } else {
+      applyPointer(e.pointerId, role, e.clientX, e.clientY);
+    }
+    publish();
+  };
+
+  const onPointerEnd = (e: React.PointerEvent) => {
+    if (!pointers.current.has(e.pointerId)) return;
+    releasePointer(e.pointerId);
+    publish();
+  };
+
+  // Celular bloqueou / app em segundo plano / janela perdeu foco: solta tudo
+  useEffect(() => {
+    const onHide = () => {
+      if (document.visibilityState === 'hidden') releaseEverything();
+    };
+    window.addEventListener('blur', releaseEverything);
+    document.addEventListener('visibilitychange', onHide);
+    return () => {
+      window.removeEventListener('blur', releaseEverything);
+      document.removeEventListener('visibilitychange', onHide);
+    };
+  }, [releaseEverything]);
+
+  const toggleFullscreen = async () => {
+    try {
+      if (document.fullscreenElement) {
+        await document.exitFullscreen();
+      } else {
+        await document.documentElement.requestFullscreen({ navigationUI: 'hide' } as FullscreenOptions);
+        const orientation = screen.orientation as ScreenOrientation & { lock?: (o: string) => Promise<void> };
+        await orientation.lock?.('landscape').catch(() => {});
+      }
+    } catch {
+      // iPhone não permite tela cheia fora de vídeo: use "Adicionar à Tela de Início"
+    }
+  };
+
+  const toggleHaptics = () => {
+    const next = !haptics;
+    setHaptics(next);
+    try {
+      localStorage.setItem('vgfa:pad-haptics', next ? 'on' : 'off');
+    } catch {}
+  };
+
+  const isOn = (bit: number) => (pressedMask & bit) !== 0;
   const leftShoulders = profile.shoulders.filter((s) => s.name === 'L1' || s.name === 'L2');
   const rightShoulders = profile.shoulders.filter((s) => s.name === 'R1' || s.name === 'R2');
+  const face = (name: ButtonSpec['name']) => profile.faceButtons.find((b) => b.name === name);
+  const faceBtn = (b: ButtonSpec | undefined, cls = '') =>
+    b ? (
+      <div
+        key={b.name}
+        data-bit={b.bit}
+        className={`vp-face ${cls} ${isOn(b.bit) ? 'is-on' : ''}`}
+        style={{ '--btn': b.color, '--btn-text': b.textColor ?? '#fff' } as React.CSSProperties}
+      >
+        <span>{b.label}</span>
+      </div>
+    ) : (
+      <div className={`vp-face-gap ${cls}`} />
+    );
 
-  const faceByPos = {
-    north: profile.faceButtons.find((b) => b.name === 'NORTH'),
-    west: profile.faceButtons.find((b) => b.name === 'WEST'),
-    east: profile.faceButtons.find((b) => b.name === 'EAST'),
-    south: profile.faceButtons.find((b) => b.name === 'SOUTH'),
-  };
+  const tone = TRANSPORT_LABEL[transport];
+  const showDpad = profile.dpadStyle !== 'joystick';
 
   return (
     <div
-      className="pad-fullscreen"
-      style={{
-        boxShadow: rumbleActive ? `inset 0 0 42px ${profile.shellAccent}` : undefined,
-      }}
+      ref={rootRef}
+      className={`vp-root ${rumbleActive ? 'is-rumble' : ''}`}
+      style={{ '--shell': profile.shellAccent } as React.CSSProperties}
+      onPointerDown={onPointerDown}
+      onPointerMove={onPointerMove}
+      onPointerUp={onPointerEnd}
+      onPointerCancel={onPointerEnd}
+      onLostPointerCapture={onPointerEnd}
+      onContextMenu={(e) => e.preventDefault()}
     >
-      {/* Top Status Bar */}
-      <div className="pad-topbar">
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-          <span
-            className="badge"
-            style={{ background: profile.shellAccent, color: '#07080d', borderColor: 'transparent' }}
-          >
-            P{slot + 1}
-          </span>
-          <div>
-            <div style={{ fontWeight: 800, fontSize: 13 }}>{profile.title}</div>
-            <div style={{ fontSize: 11, color: 'var(--text-2)' }}>{gameTitle}</div>
+      <div className="vp-ambient" aria-hidden />
+
+      <header className="vp-top">
+        <div className="vp-id">
+          <span className="vp-slot">P{slot + 1}</span>
+          <div className="vp-titles">
+            <strong>{profile.title}</strong>
+            <span>{gameTitle}</span>
           </div>
         </div>
-
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <div className="vp-actions">
           {onConsolePreviewChange && (
             <select
-              className="lang-select"
+              data-no-pad
+              className="vp-select"
               value={consoleId}
               onChange={(e) => onConsolePreviewChange(e.target.value as ConsoleId)}
             >
@@ -194,249 +358,122 @@ export const GamepadPhoneView: React.FC<Props> = ({
               ))}
             </select>
           )}
-          <span className="badge" style={{ color: transport === 'webrtc' ? '#34d399' : '#38bdf8' }}>
-            {transport === 'webrtc' ? 'WebRTC P2P' : transport === 'ws' ? 'WS LAN' : 'Preview'}
+          <span className={`vp-link tone-${tone.tone}`}>
+            <i />
+            {tone.text}
           </span>
+          <button data-no-pad className="vp-icon" onClick={toggleHaptics} aria-label="Vibração">
+            {haptics ? '📳' : '🔕'}
+          </button>
+          {canFullscreen && (
+            <button data-no-pad className="vp-icon" onClick={() => void toggleFullscreen()} aria-label="Tela cheia">
+              ⛶
+            </button>
+          )}
+          {onExit && (
+            <button data-no-pad className="vp-icon" onClick={onExit} aria-label="Sair">
+              ✕
+            </button>
+          )}
         </div>
-      </div>
+      </header>
 
-      {/* Shoulders L1/L2 & R1/R2 */}
+      {notice ? (
+        <div className="vp-toast is-notice">
+          <span className="vp-dot" /> {notice}
+        </div>
+      ) : (
+        syncToast && <div className="vp-toast">{syncToast}</div>
+      )}
+
       {profile.shoulders.length > 0 && (
-        <div className="pad-shoulders">
-          <div style={{ display: 'flex', gap: 8 }}>
+        <div className="vp-shoulders">
+          <div className="vp-shoulder-group">
             {leftShoulders.map((s) => (
-              <button
-                key={s.name}
-                className={`shoulder-btn ${pressedMask & s.bit ? 'pressed' : ''}`}
-                {...bindTouch(s.bit)}
-              >
+              <div key={s.name} data-bit={s.bit} className={`vp-shoulder ${isOn(s.bit) ? 'is-on' : ''}`}>
                 {s.label}
-              </button>
+              </div>
             ))}
           </div>
-          <div style={{ display: 'flex', gap: 8 }}>
+          <div className="vp-shoulder-group">
             {rightShoulders.map((s) => (
-              <button
-                key={s.name}
-                className={`shoulder-btn ${pressedMask & s.bit ? 'pressed' : ''}`}
-                {...bindTouch(s.bit)}
-              >
+              <div key={s.name} data-bit={s.bit} className={`vp-shoulder ${isOn(s.bit) ? 'is-on' : ''}`}>
                 {s.label}
-              </button>
+              </div>
             ))}
           </div>
         </div>
       )}
 
-      {/* Main Controller Deck */}
-      <div className="pad-deck">
-        {/* Left Side: D-Pad + Optional Left Stick */}
-        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 12 }}>
-          {profile.dpadStyle !== 'joystick' && (
-            <div className="dpad-grid">
-              <div />
-              <button
-                className={`dpad-key ${pressedMask & PAD_BIT.UP ? 'pressed' : ''}`}
-                {...bindTouch(PAD_BIT.UP)}
-              >
-                ▲
-              </button>
-              <div />
-              <button
-                className={`dpad-key ${pressedMask & PAD_BIT.LEFT ? 'pressed' : ''}`}
-                {...bindTouch(PAD_BIT.LEFT)}
-              >
-                ◀
-              </button>
-              <div
-                style={{
-                  borderRadius: 10,
-                  background: '#0f1626',
-                  border: '1px solid rgba(255,255,255,0.06)',
-                }}
-              />
-              <button
-                className={`dpad-key ${pressedMask & PAD_BIT.RIGHT ? 'pressed' : ''}`}
-                {...bindTouch(PAD_BIT.RIGHT)}
-              >
-                ▶
-              </button>
-              <div />
-              <button
-                className={`dpad-key ${pressedMask & PAD_BIT.DOWN ? 'pressed' : ''}`}
-                {...bindTouch(PAD_BIT.DOWN)}
-              >
-                ▼
-              </button>
-              <div />
+      <main className="vp-deck">
+        <section className="vp-side vp-left">
+          {showDpad && (
+            <div data-zone="dpad" className="vp-dpad">
+              <div className={`vp-arm up ${isOn(PAD_BIT.UP) ? 'is-on' : ''}`}>▲</div>
+              <div className={`vp-arm left ${isOn(PAD_BIT.LEFT) ? 'is-on' : ''}`}>◀</div>
+              <div className="vp-hub" />
+              <div className={`vp-arm right ${isOn(PAD_BIT.RIGHT) ? 'is-on' : ''}`}>▶</div>
+              <div className={`vp-arm down ${isOn(PAD_BIT.DOWN) ? 'is-on' : ''}`}>▼</div>
             </div>
           )}
-
           {profile.hasLeftStick && (
-            <VirtualAnalogStick
-              label={profile.dpadStyle === 'joystick' ? 'JOYSTICK CX40' : 'L-STICK'}
-              onMove={(x, y) => {
-                stateRef.current.lx = x;
-                stateRef.current.ly = y;
-                emit();
-              }}
-            />
+            <div data-zone="stick-l" className={`vp-stick ${showDpad ? 'is-small' : ''}`}>
+              <div ref={knobL} className="vp-knob" />
+              <span className="vp-stick-label">{showDpad ? 'L' : 'JOYSTICK'}</span>
+            </div>
           )}
-        </div>
+        </section>
 
-        {/* Center Buttons (SELECT / START / PS2 Pressure Slider) */}
-        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 10 }}>
-          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', justifyContent: 'center' }}>
+        <section className="vp-center">
+          <div className="vp-center-row">
             {profile.centerButtons.map((b) => (
-              <button
-                key={b.name}
-                className={`shoulder-btn ${pressedMask & b.bit ? 'pressed' : ''}`}
-                style={{ minWidth: 64, padding: '8px 12px', fontSize: 11 }}
-                {...bindTouch(b.bit)}
-              >
+              <div key={b.name} data-bit={b.bit} className={`vp-pill ${isOn(b.bit) ? 'is-on' : ''}`}>
                 {b.label}
-              </button>
+              </div>
             ))}
           </div>
-
           {profile.hasPressureButtons && (
-            <div
-              style={{
-                padding: '8px 10px',
-                borderRadius: 10,
-                background: 'rgba(15, 23, 42, 0.85)',
-                border: '1px solid var(--border)',
-                textAlign: 'center',
-              }}
-            >
-              <div style={{ fontSize: 10, color: 'var(--text-2)', marginBottom: 4 }}>
-                Pressão DualShock 2: {Math.round(pressureLevel * 100)}%
-              </div>
+            <label className="vp-pressure" data-no-pad>
+              <span>Pressão {Math.round(pressureLevel * 100)}%</span>
               <input
+                data-no-pad
                 type="range"
                 min={0.2}
                 max={1}
                 step={0.05}
                 value={pressureLevel}
                 onChange={(e) => setPressureLevel(Number(e.target.value))}
-                style={{ width: 120 }}
               />
-            </div>
+            </label>
           )}
-        </div>
+        </section>
 
-        {/* Right Side: Face Buttons + Optional Right Stick */}
-        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 12 }}>
+        <section className="vp-side vp-right">
           {profile.faceButtons.length === 1 ? (
-            <button
-              className={`face-btn ${pressedMask & profile.faceButtons[0].bit ? 'pressed' : ''}`}
-              style={{
-                width: 96,
-                height: 96,
-                background: profile.faceButtons[0].color,
-                color: profile.faceButtons[0].textColor ?? '#FFF',
-                fontSize: 16,
-              }}
-              {...bindTouch(profile.faceButtons[0].bit)}
-            >
-              {profile.faceButtons[0].label}
-            </button>
+            <div className="vp-face-solo">{faceBtn(profile.faceButtons[0], 'is-big')}</div>
           ) : profile.faceButtons.length === 2 ? (
-            <div style={{ display: 'flex', gap: 16 }}>
-              {profile.faceButtons.map((b) => (
-                <button
-                  key={b.name}
-                  className={`face-btn ${pressedMask & b.bit ? 'pressed' : ''}`}
-                  style={{
-                    width: 68,
-                    height: 68,
-                    background: b.color,
-                    color: b.textColor ?? '#FFF',
-                  }}
-                  {...bindTouch(b.bit)}
-                >
-                  {b.label}
-                </button>
-              ))}
+            <div className="vp-face-duo">
+              {faceBtn(face('SOUTH'), 'pos-low')}
+              {faceBtn(face('EAST'), 'pos-high')}
             </div>
           ) : (
-            <div className="face-diamond">
-              <div />
-              {faceByPos.north ? (
-                <button
-                  className={`face-btn ${pressedMask & faceByPos.north.bit ? 'pressed' : ''}`}
-                  style={{
-                    background: faceByPos.north.color,
-                    color: faceByPos.north.textColor ?? '#FFF',
-                  }}
-                  {...bindTouch(faceByPos.north.bit)}
-                >
-                  {faceByPos.north.label}
-                </button>
-              ) : (
-                <div />
-              )}
-              <div />
-              {faceByPos.west ? (
-                <button
-                  className={`face-btn ${pressedMask & faceByPos.west.bit ? 'pressed' : ''}`}
-                  style={{
-                    background: faceByPos.west.color,
-                    color: faceByPos.west.textColor ?? '#FFF',
-                  }}
-                  {...bindTouch(faceByPos.west.bit)}
-                >
-                  {faceByPos.west.label}
-                </button>
-              ) : (
-                <div />
-              )}
-              <div />
-              {faceByPos.east ? (
-                <button
-                  className={`face-btn ${pressedMask & faceByPos.east.bit ? 'pressed' : ''}`}
-                  style={{
-                    background: faceByPos.east.color,
-                    color: faceByPos.east.textColor ?? '#FFF',
-                  }}
-                  {...bindTouch(faceByPos.east.bit)}
-                >
-                  {faceByPos.east.label}
-                </button>
-              ) : (
-                <div />
-              )}
-              <div />
-              {faceByPos.south ? (
-                <button
-                  className={`face-btn ${pressedMask & faceByPos.south.bit ? 'pressed' : ''}`}
-                  style={{
-                    background: faceByPos.south.color,
-                    color: faceByPos.south.textColor ?? '#FFF',
-                  }}
-                  {...bindTouch(faceByPos.south.bit)}
-                >
-                  {faceByPos.south.label}
-                </button>
-              ) : (
-                <div />
-              )}
-              <div />
+            <div className="vp-face-diamond">
+              {faceBtn(face('NORTH'), 'pos-n')}
+              {faceBtn(face('WEST'), 'pos-w')}
+              {faceBtn(face('EAST'), 'pos-e')}
+              {faceBtn(face('SOUTH'), 'pos-s')}
             </div>
           )}
-
           {profile.hasRightStick && (
-            <VirtualAnalogStick
-              label="R-STICK"
-              onMove={(x, y) => {
-                stateRef.current.rx = x;
-                stateRef.current.ry = y;
-                emit();
-              }}
-            />
+            <div data-zone="stick-r" className="vp-stick is-small">
+              <div ref={knobR} className="vp-knob" />
+              <span className="vp-stick-label">R</span>
+            </div>
           )}
-        </div>
-      </div>
+        </section>
+      </main>
+
+      <div className="vp-rotate-hint">Gire o celular para jogar deitado ↻</div>
     </div>
   );
 };

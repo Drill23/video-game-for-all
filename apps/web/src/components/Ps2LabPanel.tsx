@@ -327,7 +327,7 @@ export const Ps2LabPanel: React.FC<Props> = ({
 
       {/* MOTOR 1: VGFA-PS2 TURBO WEBGPU (PCSX2 WASM JIT + WebGPU HW 60 FPS + VGFA Hyper-Stream + Celular Analógico!) */}
       {engineMode === 'pcsx2-webgpu' && (
-        <div style={{ borderRadius: 12, overflow: 'hidden', border: '1px solid var(--amber)', background: '#000' }}>
+        <div style={{ borderRadius: 18, overflow: 'hidden', border: '1px solid var(--glass-border)', background: '#000' }}>
           <iframe
             key={`turbo-${runnerKey}`}
             ref={(el) => {
@@ -344,7 +344,7 @@ export const Ps2LabPanel: React.FC<Props> = ({
 
       {/* MOTOR 2: VGFA-PS2 INSTANTÂNEO (Sem BIOS — Play.wasm + OPFS Virtual SSD Anti-503) */}
       {engineMode === 'vgfa-native' && (
-        <div style={{ borderRadius: 12, overflow: 'hidden', border: '1px solid var(--border)', background: '#000' }}>
+        <div style={{ borderRadius: 18, overflow: 'hidden', border: '1px solid var(--glass-border)', background: '#000' }}>
           <iframe
             key={`play-${runnerKey}`}
             ref={(el) => {

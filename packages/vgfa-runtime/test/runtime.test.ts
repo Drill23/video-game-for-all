@@ -7,6 +7,13 @@ import {
   STORE_CATALOG,
   buildEmulatorJsSrcDoc,
   detectConsoleFromFilename,
+  formatBytes,
+  getLibraryEntry,
+  getStorageInfo,
+  listLibrary,
+  listOpfsDiscs,
+  onLibraryChange,
+  readLibraryFile,
   probePs2WebCapabilities,
 } from '../src/index.js';
 
@@ -49,4 +56,23 @@ test('probePs2WebCapabilities executa de forma segura fora do navegador', async 
   const caps = await probePs2WebCapabilities();
   assert.equal(typeof caps.readinessScore, 'number');
   assert.equal(typeof caps.wasmSimdSupported, 'boolean');
+});
+
+test('formatBytes formata em pt-BR', () => {
+  assert.equal(formatBytes(0), '0 B');
+  assert.equal(formatBytes(512), '512 B');
+  assert.equal(formatBytes(1024), '1 KB');
+  assert.equal(formatBytes(Math.round(3.2 * 1024 * 1024)), '3,2 MB');
+  assert.equal(formatBytes(Math.round(1.4 * 1024 * 1024 * 1024)), '1,4 GB');
+});
+
+test('rom-library é seguro em Node (sem IndexedDB/OPFS): devolve vazio sem lançar', async () => {
+  assert.deepEqual(await listLibrary(), []);
+  assert.equal(await getLibraryEntry('https://x.test/a.nes'), null);
+  assert.equal(await readLibraryFile('https://x.test/a.nes'), null);
+  assert.deepEqual(await listOpfsDiscs(), []);
+  const info = await getStorageInfo();
+  assert.equal(typeof info.usage, 'number');
+  const off = onLibraryChange(() => undefined);
+  off();
 });

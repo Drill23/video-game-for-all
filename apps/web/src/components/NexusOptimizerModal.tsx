@@ -4,6 +4,8 @@ import {
   probePs2WebCapabilities,
   type WebGpuCapabilities,
 } from '@vgfa/runtime';
+import { Icon } from './Icon.js';
+import { useDialog } from './useDialog.js';
 
 export interface NexusProfile {
   activatedAt: number;
@@ -44,6 +46,8 @@ export const NexusOptimizerModal: React.FC<Props> = ({ onClose, onActivated }) =
   const [stepLabel, setStepLabel] = useState('');
   const [progressPct, setProgressPct] = useState(0);
   const [caps, setCaps] = useState<WebGpuCapabilities | null>(null);
+
+  useDialog(onClose);
 
   useEffect(() => {
     void probePs2WebCapabilities().then(setCaps);
@@ -195,85 +199,84 @@ export const NexusOptimizerModal: React.FC<Props> = ({ onClose, onActivated }) =
 
   return (
     <div className="modal-backdrop" onClick={onClose}>
-      <div className="modal-card" style={{ maxWidth: 560 }} onClick={(e) => e.stopPropagation()}>
+      <div
+        className="modal-card"
+        style={{ maxWidth: 560 }}
+        role="dialog"
+        aria-modal="true"
+        aria-label="VGFA Nexus Optimizer"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="sheet-grabber" />
         <div className="modal-head">
-          <h3>⚡ VGFA Nexus Optimizer — Modo Desempenho Máximo</h3>
-          <button className="btn btn-sm btn-ghost" onClick={onClose}>
-            ✕
+          <h3>VGFA Nexus Optimizer</h3>
+          <button className="icon-btn modal-close" onClick={onClose} aria-label="Fechar">
+            <Icon name="close" size={16} />
           </button>
         </div>
 
-        <p style={{ margin: '0 0 14px', fontSize: 13, color: 'var(--text-1)', lineHeight: 1.55 }}>
-          Ative os <strong>otimizadores leves nativos do navegador</strong> (apenas ~17 MB em cache local, 1 única vez) para destravar carregamento instantâneo, reduzir o uso de RAM em <strong>75%</strong> e eliminar congelamentos em batalhas pesadas de PS2 (como <em>Dragon Ball Z: BT3</em> e <em>God of War II</em>):
+        <p className="lead">
+          Ative os <strong>otimizadores leves nativos do navegador</strong> (apenas ~17 MB em cache local, 1 única vez) para destravar carregamento instantâneo, reduzir o uso de RAM em <strong>75%</strong> e eliminar congelamentos em batalhas pesadas de PS2 (como <em>Dragon Ball Z: BT3</em> e <em>God of War II</em>).
         </p>
 
-        <div
-          className="panel"
-          style={{
-            background: 'var(--bg-0)',
-            marginBottom: 14,
-            display: 'grid',
-            gap: 8,
-            fontSize: 12,
-            color: 'var(--text-1)',
-          }}
-        >
-          <div>🚀 <strong>Disco Virtual SSD OPFS:</strong> grava setores do jogo direto no SSD (fora da RAM do Chrome, 0 crash).</div>
-          <div>🛡️ <strong>Escudo Anti-503:</strong> controle inteligente de conexões + 5× retry automático contra quedas na internet.</div>
-          <div>⚡ <strong>Pré-Aquecimento WASM:</strong> trava os motores otimizados (PCSX2 WebGPU + Play.wasm) no cache local (&lt; 1s boot).</div>
-          <div>🎯 <strong>Auto-Tune GPU:</strong> ajusta automaticamente resolução (1x Tablet / 2x HD Desktop) e threads da CPU.</div>
+        <div className="feature-list">
+          <div className="feature">
+            <span className="feature-ico">🚀</span>
+            <span><b>Disco Virtual SSD OPFS:</b> grava setores do jogo direto no SSD (fora da RAM do Chrome, 0 crash).</span>
+          </div>
+          <div className="feature">
+            <span className="feature-ico">🛡️</span>
+            <span><b>Escudo Anti-503:</b> controle inteligente de conexões + 5× retry automático contra quedas na internet.</span>
+          </div>
+          <div className="feature">
+            <span className="feature-ico">⚡</span>
+            <span><b>Pré-Aquecimento WASM:</b> trava os motores otimizados (PCSX2 WebGPU + Play.wasm) no cache local (&lt; 1s boot).</span>
+          </div>
+          <div className="feature">
+            <span className="feature-ico">🎯</span>
+            <span><b>Auto-Tune GPU:</b> ajusta automaticamente resolução (1x Tablet / 2x HD Desktop) e threads da CPU.</span>
+          </div>
         </div>
 
         {running && (
           <div style={{ marginBottom: 14 }}>
-            <div style={{ fontSize: 12, color: 'var(--amber)', fontWeight: 700, marginBottom: 6 }}>{stepLabel}</div>
-            <div className="progress-track" style={{ width: '100%' }}>
+            <div style={{ fontSize: 12.5, color: 'var(--accent)', fontWeight: 700, marginBottom: 6 }}>{stepLabel}</div>
+            <div className="progress-track" style={{ width: '100%', maxWidth: 'none' }}>
               <div className="progress-fill" style={{ width: `${progressPct}%` }} />
             </div>
           </div>
         )}
 
         {profile && !running && (
-          <div
-            className="panel"
-            style={{
-              background: 'rgba(16, 185, 129, 0.08)',
-              borderColor: 'rgba(52, 211, 153, 0.4)',
-              marginBottom: 14,
-              display: 'grid',
-              gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))',
-              gap: 10,
-              fontSize: 12,
-            }}
-          >
+          <div className="stat-grid">
             <div>
-              <div style={{ color: 'var(--text-2)', fontSize: 11 }}>Disco Virtual OPFS</div>
-              <strong style={{ color: '#6ee7b7' }}>
+              <div className="stat-k">Disco Virtual OPFS</div>
+              <strong className="stat-v">
                 {profile.opfsAvailable ? `Ativo (${profile.opfsReadMbps} MB/s)` : 'Modo RAM Seguro'}
               </strong>
             </div>
             <div>
-              <div style={{ color: 'var(--text-2)', fontSize: 11 }}>Motores em Cache Local</div>
-              <strong style={{ color: '#6ee7b7' }}>
+              <div className="stat-k">Motores em Cache Local</div>
+              <strong className="stat-v">
                 {profile.coresCachedCount} módulos ({profile.coresCachedMb} MB)
               </strong>
             </div>
             <div>
-              <div style={{ color: 'var(--text-2)', fontSize: 11 }}>WebGPU + JSPI (PS2 60 FPS)</div>
-              <strong style={{ color: profile.dualSourceBlending && profile.jspi ? '#6ee7b7' : '#fde68a' }}>
+              <div className="stat-k">WebGPU + JSPI (PS2 60 FPS)</div>
+              <strong className={`stat-v ${profile.dualSourceBlending && profile.jspi ? '' : 'is-warn'}`}>
                 {profile.dualSourceBlending && profile.jspi ? 'Pronto (Chrome/Edge)' : 'Use Chrome p/ 60 FPS'}
               </strong>
             </div>
             <div>
-              <div style={{ color: 'var(--text-2)', fontSize: 11 }}>Perfil Auto-Tune</div>
-              <strong style={{ color: '#7dd3fc' }}>
+              <div className="stat-k">Perfil Auto-Tune</div>
+              <strong className="stat-v is-info">
                 {profile.cpuThreads} threads • {profile.recommendedUpscale}x {profile.recommendedUpscale === 2 ? 'HD' : 'Turbo'}
               </strong>
             </div>
           </div>
         )}
 
-        <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end', flexWrap: 'wrap' }}>
+        <div className="modal-actions">
           <button className="btn btn-ghost" onClick={onClose}>
             {profile ? 'Fechar' : 'Agora não'}
           </button>
@@ -283,10 +286,10 @@ export const NexusOptimizerModal: React.FC<Props> = ({ onClose, onActivated }) =
             onClick={() => void runOptimization()}
           >
             {running
-              ? '⏳ Otimizando navegador...'
+              ? 'Otimizando navegador...'
               : profile
-                ? '🔄 Recalibrar Otimizadores'
-                : '⚡ Sim, Ativar Otimizadores Leves Agora'}
+                ? 'Recalibrar otimizadores'
+                : 'Ativar otimizadores leves agora'}
           </button>
         </div>
       </div>

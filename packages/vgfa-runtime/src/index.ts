@@ -6,3 +6,4 @@ export * from './builtin-engine.js';
 export * from './archive-search.js';
 export * from './ps2-webgpu-bridge.js';
 export * from './retro-engine.js';
+export * from './rom-library.js';

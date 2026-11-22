@@ -6,8 +6,10 @@ import {
   type ConsoleId,
   type PadState,
 } from '@vgfa/pad';
+import { Icon } from '../components/Icon.js';
 import { MobileInlinePad } from '../components/MobileInlinePad.js';
 import { VgfaCastViewer } from '../services/vgfa-cast.js';
+import '../styles/player.css';
 
 interface Props {
   initialCastCode?: string;
@@ -98,24 +100,27 @@ export const WatchPage: React.FC<Props> = ({ initialCastCode }) => {
 
   if (!activeCode) {
     return (
-      <div className="vgfa-shell" style={{ maxWidth: 480, paddingTop: 48 }}>
-        <div className="panel" style={{ textAlign: 'center', display: 'flex', flexDirection: 'column', gap: 14 }}>
-          <h2 style={{ margin: 0 }}>📡 VGFA-Cast — Jogar por Streaming 60 FPS</h2>
-          <p style={{ margin: 0, fontSize: 13, color: 'var(--text-1)' }}>
-            Digite o código da transmissão enviado pelo seu amigo (ex: <code>CAST-A7K2</code>) para jogar direto na tela sem baixar nenhum arquivo!
+      <div className="vgfa-shell watch-entry">
+        <div className="watch-card glass-strong">
+          <span className="watch-ico">
+            <Icon name="globe" size={26} />
+          </span>
+          <h2>VGFA-Cast · Jogar por streaming</h2>
+          <p>
+            Digite o código da transmissão enviado pelo seu amigo (ex: <code>CAST-A7K2</code>) para jogar direto na tela sem baixar nenhum arquivo.
           </p>
           <input
-            className="input mono"
+            className="input mono watch-input"
             placeholder="CAST-XXXX"
             value={codeInput}
             onChange={(e) => setCodeInput(e.target.value.toUpperCase())}
           />
           <button
-            className="btn btn-primary"
+            className="btn btn-primary btn-lg"
             disabled={!codeInput.trim()}
             onClick={() => setActiveCode(codeInput.trim())}
           >
-            ▶ Conectar na Transmissão
+            <Icon name="play" size={18} /> Conectar na transmissão
           </button>
           <a className="btn btn-ghost" href={import.meta.env.BASE_URL}>
             ← Voltar para a Loja VGFA
@@ -126,15 +131,15 @@ export const WatchPage: React.FC<Props> = ({ initialCastCode }) => {
   }
 
   return (
-    <div className="mobile-player-shell">
+    <div className="mobile-player-shell watch-shell">
       <div className="mobile-stage-bar">
-        <a className="btn btn-sm btn-ghost" href={import.meta.env.BASE_URL}>
+        <a className="btn btn-sm" href={import.meta.env.BASE_URL}>
           ← Loja
         </a>
-        <strong style={{ fontSize: 13, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-          📡 {gameTitle} ({activeCode})
+        <strong className="mobile-title">
+          <i className={`live-dot ${status === 'live' ? 'is-live' : ''}`} /> {gameTitle} ({activeCode})
         </strong>
-        <button className="btn btn-sm btn-ghost" onClick={() => setShowPad((v) => !v)}>
+        <button className="btn btn-sm" onClick={() => setShowPad((v) => !v)}>
           {showPad ? '🎮 Ocultar Pad' : '🎮 Mostrar Pad'}
         </button>
       </div>
@@ -149,29 +154,17 @@ export const WatchPage: React.FC<Props> = ({ initialCastCode }) => {
         />
 
         {status !== 'live' && (
-          <div
-            style={{
-              position: 'absolute',
-              inset: 0,
-              background: 'rgba(7, 8, 13, 0.92)',
-              display: 'flex',
-              flexDirection: 'column',
-              alignItems: 'center',
-              justifyContent: 'center',
-              gap: 10,
-              padding: 20,
-              textAlign: 'center',
-            }}
-          >
+          <div className="boot-overlay">
             {status === 'error' ? (
-              <>
-                <strong style={{ color: '#fb7185' }}>{error || 'Transmissão encerrada.'}</strong>
+              <div className="boot-error">
+                <strong>{error || 'Transmissão encerrada.'}</strong>
                 <button className="btn btn-sm btn-primary" onClick={() => setActiveCode('')}>
-                  Tentar Outro Código
+                  Tentar outro código
                 </button>
-              </>
+              </div>
             ) : (
               <>
+                <div className="glass-spinner" />
                 <strong>Conectando ao vídeo 60 FPS (WebRTC)...</strong>
                 <span style={{ fontSize: 12, color: 'var(--text-2)' }}>
                   0 MB baixados • Controle 16 bytes pronto

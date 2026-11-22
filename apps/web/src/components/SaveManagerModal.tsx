@@ -1,5 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { VgfaSaveStore, type SaveSlotSummary } from '@vgfa/storage';
+import { Icon } from './Icon.js';
+import { useDialog } from './useDialog.js';
 
 interface Props {
   saveStore: VgfaSaveStore;
@@ -16,6 +18,8 @@ function formatBytes(bytes: number): string {
 export const SaveManagerModal: React.FC<Props> = ({ saveStore, userId, onClose }) => {
   const [saves, setSaves] = useState<SaveSlotSummary[]>([]);
   const [status, setStatus] = useState<string | null>(null);
+
+  useDialog(onClose);
 
   const refresh = async () => {
     const list = await saveStore.listByUser(userId);
@@ -63,80 +67,57 @@ export const SaveManagerModal: React.FC<Props> = ({ saveStore, userId, onClose }
 
   return (
     <div className="modal-backdrop" onClick={onClose}>
-      <div className="modal-card" style={{ maxWidth: 600 }} onClick={(e) => e.stopPropagation()}>
+      <div
+        className="modal-card"
+        style={{ maxWidth: 600 }}
+        role="dialog"
+        aria-modal="true"
+        aria-label="Saves locais"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="sheet-grabber" />
         <div className="modal-head">
-          <h3>Saves Locais & Memory Cards (IndexedDB)</h3>
-          <button className="btn btn-sm btn-ghost" onClick={onClose}>
-            ✕
+          <h3>Saves locais e Memory Cards</h3>
+          <button className="icon-btn modal-close" onClick={onClose} aria-label="Fechar">
+            <Icon name="close" size={16} />
           </button>
         </div>
 
-        <p style={{ margin: '0 0 14px', fontSize: 13, color: 'var(--text-2)', lineHeight: 1.5 }}>
+        <p className="lead">
           Seus saves ficam guardados localmente no navegador via <strong>IndexedDB</strong> (sem o limite de 5 MB do localStorage), incluindo suporte a Memory Cards <code>.ps2</code> de 8 MB compatíveis com PCSX2.
         </p>
 
-        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 14 }}>
+        <div className="hstack" style={{ marginBottom: 14 }}>
           <button className="btn btn-sm btn-cyan" onClick={() => handleCreateMemoryCard('memcard-ps2')}>
             + Novo Memory Card PS2 (8 MB)
           </button>
-          <button className="btn btn-sm btn-ghost" onClick={() => handleCreateMemoryCard('memcard-ps1')}>
+          <button className="btn btn-sm" onClick={() => handleCreateMemoryCard('memcard-ps1')}>
             + Novo Memory Card PS1 (128 KB)
           </button>
         </div>
 
-        {status && (
-          <div
-            style={{
-              padding: '8px 12px',
-              marginBottom: 12,
-              borderRadius: 10,
-              background: 'rgba(52, 211, 153, 0.14)',
-              border: '1px solid rgba(52, 211, 153, 0.4)',
-              color: '#a7f3d0',
-              fontSize: 12,
-            }}
-          >
-            {status}
-          </div>
-        )}
+        {status && <div className="notice notice-ok">{status}</div>}
 
         {saves.length === 0 ? (
-          <div style={{ padding: 24, textAlign: 'center', color: 'var(--text-2)', fontSize: 13 }}>
+          <div style={{ padding: 24, textAlign: 'center', color: 'var(--text-2)', fontSize: 13.5, lineHeight: 1.5 }}>
             Nenhum save encontrado ainda. Abra qualquer jogo e clique em <strong>Salvar Estado</strong> ou crie um Memory Card acima.
           </div>
         ) : (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+          <div className="stack" style={{ gap: 10 }}>
             {saves.map((s) => (
-              <div
-                key={s.id}
-                style={{
-                  padding: '12px 14px',
-                  borderRadius: 12,
-                  background: 'var(--bg-0)',
-                  border: '1px solid var(--border)',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'space-between',
-                  gap: 10,
-                  flexWrap: 'wrap',
-                }}
-              >
-                <div>
-                  <div style={{ fontWeight: 700, fontSize: 14 }}>{s.gameTitle}</div>
-                  <div style={{ fontSize: 12, color: 'var(--text-2)' }}>
+              <div key={s.id} className="list-item">
+                <div style={{ minWidth: 0 }}>
+                  <div className="item-title">{s.gameTitle}</div>
+                  <div className="item-sub">
                     {s.consoleId.toUpperCase()} • {s.kind} • Slot {s.slot} • {formatBytes(s.sizeBytes)} •{' '}
                     {new Date(s.updatedAt).toLocaleString()}
                   </div>
                 </div>
-                <div style={{ display: 'flex', gap: 6 }}>
-                  <button className="btn btn-sm btn-ghost" onClick={() => handleExport(s)}>
+                <div className="hstack" style={{ gap: 6 }}>
+                  <button className="btn btn-sm" onClick={() => handleExport(s)}>
                     Exportar
                   </button>
-                  <button
-                    className="btn btn-sm btn-ghost"
-                    style={{ color: '#fb7185' }}
-                    onClick={() => handleDelete(s.id)}
-                  >
+                  <button className="btn btn-sm btn-danger" onClick={() => handleDelete(s.id)}>
                     Excluir
                   </button>
                 </div>

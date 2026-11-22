@@ -2,6 +2,9 @@ import React, { useEffect, useState } from 'react';
 import QRCode from 'qrcode';
 import type { ConnectedPadInfo } from '@vgfa/pad';
 import type { Dictionary } from '../i18n/translations.js';
+import { Icon } from './Icon.js';
+import { padKindLabel } from './padKind.js';
+import { useDialog } from './useDialog.js';
 
 interface Props {
   t: Dictionary;
@@ -21,6 +24,8 @@ export const QrConnectModal: React.FC<Props> = ({
   const [padUrl, setPadUrl] = useState<string>('');
   const [qrDataUrl, setQrDataUrl] = useState<string>('');
   const [copied, setCopied] = useState(false);
+
+  useDialog(onClose);
 
   useEffect(() => {
     let active = true;
@@ -75,35 +80,32 @@ export const QrConnectModal: React.FC<Props> = ({
 
   return (
     <div className="modal-backdrop" onClick={onClose}>
-      <div className="modal-card" style={{ maxWidth: 520 }} onClick={(e) => e.stopPropagation()}>
+      <div
+        className="modal-card"
+        style={{ maxWidth: 520 }}
+        role="dialog"
+        aria-modal="true"
+        aria-label={t.qrTitle}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="sheet-grabber" />
         <div className="modal-head">
           <h3>{t.qrTitle}</h3>
-          <button className="btn btn-sm btn-ghost" onClick={onClose}>
-            ✕
+          <button className="icon-btn modal-close" onClick={onClose} aria-label="Fechar">
+            <Icon name="close" size={16} />
           </button>
         </div>
 
-        <p style={{ margin: '0 0 16px', fontSize: 13, color: 'var(--text-2)', lineHeight: 1.5 }}>
-          {t.qrHint}
-        </p>
+        <p className="lead">{t.qrHint}</p>
 
-        <div
-          style={{
-            display: 'flex',
-            flexDirection: 'column',
-            alignItems: 'center',
-            gap: 12,
-            padding: 18,
-            borderRadius: 14,
-            background: 'var(--bg-0)',
-            border: '1px solid var(--border)',
-          }}
-        >
+        <div className="qr-box">
           {qrDataUrl ? (
             <img
+              className="qr-img"
               src={qrDataUrl}
               alt="QR Code VGFA Controller"
-              style={{ width: 204, height: 204, borderRadius: 12 }}
+              width={204}
+              height={204}
             />
           ) : (
             <div style={{ width: 204, height: 204, display: 'grid', placeItems: 'center', color: 'var(--text-2)' }}>
@@ -111,31 +113,14 @@ export const QrConnectModal: React.FC<Props> = ({
             </div>
           )}
 
-          <div style={{ textAlign: 'center' }}>
-            <div style={{ fontSize: 11, color: 'var(--text-2)', textTransform: 'uppercase' }}>
-              {t.roomCode}
-            </div>
-            <div
-              className="mono"
-              style={{ fontSize: 24, fontWeight: 800, color: 'var(--amber)', letterSpacing: '0.08em' }}
-            >
-              {roomCode ?? 'CONECTANDO...'}
-            </div>
+          <div>
+            <div className="code-label">{t.roomCode}</div>
+            <div className="code-big mono">{roomCode ?? 'CONECTANDO...'}</div>
           </div>
 
-          <div
-            className="mono"
-            style={{
-              fontSize: 11,
-              color: 'var(--text-2)',
-              wordBreak: 'break-all',
-              textAlign: 'center',
-            }}
-          >
-            {padUrl}
-          </div>
+          <div className="mono url-text">{padUrl}</div>
 
-          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', justifyContent: 'center' }}>
+          <div className="hstack" style={{ justifyContent: 'center' }}>
             <button
               className="btn btn-sm btn-cyan"
               onClick={() => {
@@ -144,7 +129,7 @@ export const QrConnectModal: React.FC<Props> = ({
                 setTimeout(() => setCopied(false), 1800);
               }}
             >
-              {copied ? 'Link Copiado!' : 'Copiar Link'}
+              {copied ? 'Link copiado' : 'Copiar link'}
             </button>
             <a
               className="btn btn-sm btn-primary"
@@ -157,34 +142,22 @@ export const QrConnectModal: React.FC<Props> = ({
           </div>
         </div>
 
-        <div style={{ marginTop: 16 }}>
-          <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--text-1)', marginBottom: 8 }}>
+        <div style={{ marginTop: 18 }}>
+          <div style={{ fontSize: 12.5, fontWeight: 700, color: 'var(--text-1)', marginBottom: 8 }}>
             {t.connectedPads} ({allPads.length}/4)
           </div>
           {allPads.length === 0 ? (
-            <div style={{ fontSize: 12, color: 'var(--text-2)' }}>
+            <div style={{ fontSize: 13, color: 'var(--text-2)' }}>
               Aguardando celular via QR Code ou controle Bluetooth...
             </div>
           ) : (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            <div className="stack" style={{ gap: 6 }}>
               {allPads.map((p) => (
-                <div
-                  key={p.id}
-                  style={{
-                    display: 'flex',
-                    justifyContent: 'space-between',
-                    alignItems: 'center',
-                    padding: '8px 12px',
-                    borderRadius: 10,
-                    background: 'var(--bg-0)',
-                    border: '1px solid var(--border)',
-                    fontSize: 12,
-                  }}
-                >
+                <div key={p.id} className="list-item" style={{ padding: '8px 12px', fontSize: 13 }}>
                   <span>
-                    <strong style={{ color: 'var(--amber)' }}>P{p.slot + 1}</strong> • {p.label}
+                    <strong style={{ color: 'var(--accent)' }}>P{p.slot + 1}</strong> • {p.label}
                   </span>
-                  <span className="badge">{p.kind}</span>
+                  <span className="badge">{padKindLabel(p.kind)}</span>
                 </div>
               ))}
             </div>

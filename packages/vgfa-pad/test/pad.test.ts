@@ -68,3 +68,35 @@ test('Todos os 9 consoles (Atari 2600 até PS2) têm perfil de controle adaptati
   assert.equal(CONTROLLER_PROFILES.ps2.hasRightStick, true);
   assert.equal(CONTROLLER_PROFILES.atari2600.faceButtons.length, 1);
 });
+
+test('VGFA Link: pacote de 16 bytes atravessa o relé em base64 sem perdas', async () => {
+  const { packetToBase64, base64ToPacket } = await import('../src/index.js');
+  const packet = encodePadPacket({ ...createEmptyForTest(), buttons: PAD_BIT.START | PAD_BIT.EAST, lx: -1, seq: 77 });
+  const back = base64ToPacket(packetToBase64(packet));
+  assert.ok(back);
+  const decoded = decodePadPacket(back!);
+  assert.equal(decoded?.buttons, PAD_BIT.START | PAD_BIT.EAST);
+  assert.equal(decoded?.seq, 77);
+});
+
+test('Bomba de estado reenvia o estado completo (botão nunca fica preso nem some)', async () => {
+  const { PadStatePump } = await import('../src/index.js');
+  const sent: Uint8Array[] = [];
+  const pump = new PadStatePump({ mode: () => 'fast', sendFast: (p) => sent.push(p), sendSlow: () => {} });
+  pump.setSlot(1);
+  pump.start();
+  pump.update({ ...createEmptyForTest(), buttons: PAD_BIT.SOUTH });
+  await new Promise((r) => setTimeout(r, 160));
+  pump.update({ ...createEmptyForTest(), buttons: 0 });
+  pump.stop();
+  assert.ok(sent.length >= 3, `esperava reenvios contínuos, veio ${sent.length}`);
+  const states = sent.map((p) => decodePadPacket(p)!);
+  assert.equal(states[0].buttons, PAD_BIT.SOUTH);
+  assert.equal(states[0].slot, 1);
+  assert.equal(states[states.length - 1].buttons, 0, 'o último pacote solta o botão');
+  for (let i = 1; i < states.length; i++) assert.ok(states[i].seq > states[i - 1].seq);
+});
+
+function createEmptyForTest() {
+  return { buttons: 0, lx: 0, ly: 0, rx: 0, ry: 0, l2Pressure: 0, r2Pressure: 0, crossPressure: 0, squarePressure: 0, slot: 0, seq: 0 };
+}

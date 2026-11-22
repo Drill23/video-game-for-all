@@ -4,6 +4,15 @@
 
 ---
 
+## Novidades da v0.7 — "Prisma"
+
+- **Visual Liquid Glass "Prisma"** do zero: home com destaque cinematográfico, linhas de cards, abas Início · Loja · Minha Central · Controle, tema escuro/claro, ícone e apresentação novos, modo leve automático em aparelhos fracos.
+- **VGFA Link — controle do celular sem servidor:** pareamento por brokers MQTT públicos (EMQX/Mosquitto) direto do GitHub Pages; os botões funcionam pelo relé em ~2 s e sobem sozinhos para WebRTC direto. Se a rede bloquear o P2P, o controle continua pela internet.
+- **Controles corrigidos:** o celular manda o **estado completo** dos botões (30x/s apertado, 3x/s parado) e o emulador recebe o estado de cada jogador e se corrige sozinho — acabou o "funcionou no começo e depois parou". Deslizar o dedo entre botões (B→A), direcional com diagonais, tela sempre acesa, solta tudo ao bloquear o celular, e o celular volta como o **mesmo jogador** ao reconectar. O código da sala sobrevive a recarregar a página.
+- **VGFA-Cast sem servidor:** o erro "Falha ao conectar no servidor VGFA-Cast" no GitHub Pages foi resolvido usando o mesmo VGFA Link.
+- **Minha Central:** jogos ficam guardados no aparelho de quem joga (IndexedDB em pedaços de 8 MiB), abrem de novo sem baixar, com medidor de espaço, "Proteger meus jogos", apagar jogo a jogo, "Liberar tudo" e limpeza dos discos PS2 em cache.
+- **Desempenho:** telas do jogo/controle carregadas sob demanda (JS inicial ~80 kB menor), sem re-render da tela do jogo a cada pacote do controle.
+
 ## O que já está funcionando (v0.5)
 
 - **Loja / Catálogo VGFA com 53 Títulos e Capas Reais:**

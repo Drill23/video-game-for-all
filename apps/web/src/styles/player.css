@@ -1,0 +1,729 @@
+/* ==========================================================================
+   VGFA — Tela do jogo, pré-jogo e VGFA-Cast (Watch) no Liquid Glass "Prisma".
+   Só visual: nenhuma regra aqui muda geometria dos botões de toque (mobile-*).
+   ========================================================================== */
+
+/* ---------- Pulso de status ---------- */
+.pulse-dot {
+  position: relative;
+  display: inline-block;
+  flex: 0 0 auto;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--amber);
+}
+
+.pulse-dot::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: inherit;
+  animation: pulse-ring 1.8s ease-out infinite;
+}
+
+.is-ok .pulse-dot,
+.live-pill .pulse-dot {
+  background: var(--success);
+}
+
+.is-ok .pulse-dot::after {
+  animation: none;
+  opacity: 0;
+}
+
+@keyframes pulse-ring {
+  from {
+    opacity: 0.6;
+    transform: scale(1);
+  }
+  to {
+    opacity: 0;
+    transform: scale(2.6);
+  }
+}
+
+/* ---------- Pré-jogo ---------- */
+.pg {
+  position: relative;
+  isolation: isolate;
+}
+
+.pg-bg {
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.pg-bg img {
+  position: absolute;
+  top: -80px;
+  left: -80px;
+  width: calc(100% + 160px);
+  height: calc(100% + 160px);
+  object-fit: cover;
+  filter: blur(40px) saturate(1.6);
+  transform: scale(1.15);
+  opacity: 0.9;
+}
+
+.pg-tint {
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(70% 80% at 15% 30%, color-mix(in srgb, var(--ph, #8b7cff) 40%, transparent), transparent 70%);
+}
+
+.pg-scrim {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(180deg, color-mix(in srgb, var(--bg-0) 62%, transparent), color-mix(in srgb, var(--bg-0) 86%, transparent));
+}
+
+.pg-shell {
+  max-width: 1180px;
+  padding-top: 20px;
+  padding-bottom: 48px;
+}
+
+.pg-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 18px;
+}
+
+.pg-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 0.85fr) minmax(0, 1.15fr);
+  gap: clamp(24px, 4.5vw, 64px);
+  align-items: start;
+}
+
+.pg-hero {
+  position: sticky;
+  top: 96px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 26px;
+  min-width: 0;
+}
+
+.pg-cover {
+  position: relative;
+  width: min(100%, 270px);
+  aspect-ratio: 3 / 4;
+  border-radius: 26px;
+  overflow: hidden;
+  transform: rotateY(-10deg) rotateX(3deg) rotate(1.5deg);
+  box-shadow:
+    0 50px 80px -30px rgba(0, 0, 0, 0.7),
+    0 0 0 1px rgba(255, 255, 255, 0.2);
+  -webkit-box-reflect: below 6px linear-gradient(transparent 72%, rgba(255, 255, 255, 0.16));
+}
+
+.pg-cover .cover {
+  position: absolute;
+  inset: 0;
+}
+
+.pg-gloss {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: linear-gradient(115deg, rgba(255, 255, 255, 0.38) 0%, rgba(255, 255, 255, 0.08) 26%, transparent 46%);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.5);
+}
+
+.pg-meta {
+  min-width: 0;
+}
+
+.pg-title {
+  margin: 12px 0 10px;
+  font-size: clamp(30px, 4.4vw, 56px);
+  line-height: 1.03;
+  letter-spacing: -0.035em;
+  font-weight: 800;
+  text-wrap: balance;
+  overflow-wrap: anywhere;
+}
+
+.pg-sub {
+  margin: 0;
+  max-width: 46ch;
+  font-size: 14.5px;
+  line-height: 1.55;
+  color: var(--text-1);
+}
+
+.pg-side {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-width: 0;
+}
+
+.pg-kicker {
+  margin: 0 0 2px;
+  font-size: 12.5px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-2);
+}
+
+.pg-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.pg-card {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 16px;
+  border-radius: var(--radius-lg);
+}
+
+.pg-card.is-ok {
+  border-color: color-mix(in srgb, var(--success) 55%, transparent);
+}
+
+.pg-card-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.pg-card-head h3 {
+  margin: 0 0 2px;
+  font-size: 16px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+.pg-card-head p {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--text-2);
+}
+
+.pg-ico {
+  flex: 0 0 auto;
+  width: 40px;
+  height: 40px;
+  display: grid;
+  place-items: center;
+  border-radius: 14px;
+  color: var(--ink-on-accent);
+  background: var(--accent-grad);
+}
+
+.pg-qr-row {
+  display: flex;
+  align-items: center;
+  gap: 22px;
+  flex-wrap: wrap;
+}
+
+.pg-qr {
+  background: #fff;
+  border-radius: 26px;
+  padding: 10px;
+  box-shadow: 0 20px 40px -18px rgba(0, 0, 0, 0.6);
+}
+
+.pg-qr img {
+  display: block;
+  border-radius: 12px;
+}
+
+.pg-qr-wait {
+  width: 176px;
+  height: 176px;
+  display: grid;
+  place-items: center;
+  font-size: 12px;
+  color: #5b5b70;
+}
+
+.pg-code {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.pg-code-label {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-2);
+}
+
+.pg-code-val {
+  font-size: clamp(30px, 4.4vw, 44px);
+  font-weight: 800;
+  line-height: 1;
+  letter-spacing: 0.08em;
+  background: var(--accent-grad);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  overflow-wrap: anywhere;
+}
+
+.pg-link {
+  font-size: 12.5px;
+  color: var(--cyan);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.pg-status-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.pg-status {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 11px 14px;
+  border-radius: 14px;
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--text-1);
+  background: var(--field-bg);
+  border: 1px solid var(--border);
+}
+
+.pg-status.is-ok {
+  color: var(--success);
+  background: color-mix(in srgb, var(--success) 13%, transparent);
+  border-color: color-mix(in srgb, var(--success) 42%, transparent);
+}
+
+.pg-hint,
+.pg-url {
+  font-size: 11.5px;
+  color: var(--text-2);
+  word-break: break-all;
+}
+
+.pg-keys {
+  padding: 0 6px;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--text-2);
+}
+
+.pg-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13.5px;
+  font-weight: 600;
+}
+
+.pg-cta {
+  width: 100%;
+  min-height: 62px;
+  margin-top: 4px;
+  font-size: 18px;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.55),
+    0 18px 40px -14px rgba(255, 126, 182, 0.85);
+}
+
+@media (max-width: 900px) {
+  .pg-grid {
+    grid-template-columns: 1fr;
+    gap: 22px;
+  }
+  .pg-hero {
+    position: static;
+    flex-direction: row;
+    align-items: center;
+    gap: 18px;
+  }
+  .pg-cover {
+    flex: 0 0 auto;
+    width: 112px;
+    border-radius: 18px;
+    transform: rotate(-2deg);
+    -webkit-box-reflect: unset;
+  }
+  .pg-title {
+    font-size: clamp(24px, 7vw, 36px);
+  }
+  .pg-sub {
+    font-size: 13px;
+  }
+  .pg-qr-row {
+    justify-content: center;
+  }
+}
+
+@media (max-width: 420px) {
+  .pg-hero .pg-sub {
+    display: none;
+  }
+  .pg-qr-wait,
+  .pg-qr img {
+    width: 168px;
+    height: 168px;
+  }
+  .pg-card {
+    padding: 14px;
+  }
+}
+
+/* ---------- Tela de jogo (desktop/tablet) ---------- */
+.player-shell {
+  padding-bottom: 56px;
+}
+
+.stage-box .btn {
+  white-space: normal;
+  text-align: center;
+}
+
+.stage-bar {
+  padding: 9px 12px 9px 12px;
+  gap: 10px 14px;
+}
+
+.stage-bar .btn {
+  white-space: nowrap;
+}
+
+.sb-left {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+.sb-title {
+  min-width: 0;
+}
+
+.sb-name {
+  font-size: 14.5px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sb-sub {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 11.5px;
+  color: var(--text-2);
+}
+
+.sb-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--amber);
+}
+
+.sb-dot.is-ok {
+  background: var(--success);
+  box-shadow: 0 0 8px var(--success);
+}
+
+.sb-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.stage-toast {
+  width: fit-content;
+  margin: 10px 14px 0;
+  padding: 7px 14px;
+  border-radius: 999px;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--success);
+  background: color-mix(in srgb, var(--success) 14%, transparent);
+  border: 1px solid color-mix(in srgb, var(--success) 40%, transparent);
+}
+
+.player-info {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px 16px;
+  margin-top: 14px;
+  padding: 14px 18px;
+  border-radius: var(--radius-md);
+}
+
+@media (max-width: 640px) {
+  .stage-bar {
+    padding: 8px;
+  }
+  .sb-actions {
+    width: 100%;
+  }
+  .sb-actions .btn {
+    flex: 1 1 auto;
+  }
+  .player-shell {
+    padding-left: 10px;
+    padding-right: 10px;
+  }
+}
+
+/* ---------- Carregando / erro dentro do palco ---------- */
+.boot-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  padding: 24px;
+  text-align: center;
+  color: var(--text-0);
+  background:
+    radial-gradient(60% 60% at 50% 40%, rgba(183, 156, 255, 0.16), transparent 70%),
+    rgba(8, 8, 14, 0.9);
+}
+
+.boot-overlay .progress-track {
+  max-width: 320px;
+  margin-top: 0;
+}
+
+.boot-error {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  max-width: 440px;
+  padding: 22px;
+  border-radius: 22px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.2);
+}
+
+.boot-error strong {
+  font-size: 16px;
+}
+
+.boot-error span {
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text-1);
+  overflow-wrap: anywhere;
+}
+
+/* ---------- Barra do jogo no celular / Watch ---------- */
+.mobile-stage-bar .mobile-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: center;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.mobile-stage-bar .btn {
+  min-height: 34px;
+  flex: 0 0 auto;
+}
+
+.live-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-right: 4px;
+  border-radius: 50%;
+  background: var(--amber);
+  vertical-align: baseline;
+}
+
+.live-dot.is-live {
+  background: var(--success);
+  box-shadow: 0 0 10px var(--success);
+}
+
+.watch-entry {
+  max-width: 520px;
+  padding-top: 56px;
+}
+
+.watch-card {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 30px 26px;
+  border-radius: var(--radius-xl);
+  text-align: center;
+}
+
+.watch-card h2 {
+  margin: 0;
+  font-size: 24px;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+}
+
+.watch-card p {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.55;
+  color: var(--text-1);
+}
+
+.watch-ico {
+  align-self: center;
+  width: 56px;
+  height: 56px;
+  display: grid;
+  place-items: center;
+  border-radius: 18px;
+  color: var(--ink-on-accent);
+  background: var(--accent-grad);
+  box-shadow: 0 14px 30px -12px rgba(255, 126, 182, 0.8);
+}
+
+.watch-input {
+  text-align: center;
+  font-size: 20px;
+  letter-spacing: 0.14em;
+  min-height: 54px;
+}
+
+/* No computador, o vídeo do amigo fica numa moldura central arredondada */
+@media (min-width: 900px) and (min-height: 541px) {
+  .watch-shell .mobile-screen-area {
+    background: transparent;
+    padding: 16px 24px;
+  }
+  .watch-shell .mobile-screen-area video {
+    border-radius: 24px;
+    box-shadow:
+      0 40px 80px -30px rgba(0, 0, 0, 0.8),
+      0 0 0 1px rgba(255, 255, 255, 0.14);
+  }
+  .watch-shell .boot-overlay {
+    border-radius: 24px;
+    inset: 16px 24px;
+  }
+}
+
+/* ---------- Modal do VGFA-Cast ---------- */
+.notice-warn {
+  color: var(--text-0);
+  background: color-mix(in srgb, var(--amber) 16%, transparent);
+  border-color: color-mix(in srgb, var(--amber) 45%, transparent);
+}
+
+.live-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 30px;
+  padding: 0 14px;
+  border-radius: 999px;
+  font-size: 12.5px;
+  font-weight: 700;
+  color: var(--success);
+  background: color-mix(in srgb, var(--success) 15%, transparent);
+  border: 1px solid color-mix(in srgb, var(--success) 42%, transparent);
+}
+
+.copy-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+}
+
+.copy-row .field {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 38px;
+  font-size: 12px;
+}
+
+/* ---------- PS2 Lab dentro do palco ---------- */
+.stage-box iframe {
+  border-radius: 14px;
+}
+
+/* ---------- Celulares estreitos (≤ 400 px): o controle de toque não pode vazar da tela ---------- */
+@media (max-width: 400px) {
+  .mobile-deck {
+    padding-left: 8px;
+    padding-right: 8px;
+  }
+  .mobile-deck .mobile-deck-main {
+    gap: 6px;
+  }
+  .mobile-deck .mobile-dpad {
+    grid-template-columns: repeat(3, 36px);
+    grid-template-rows: repeat(3, 36px);
+    gap: 3px;
+  }
+  .mobile-deck .mobile-diamond {
+    grid-template-columns: repeat(3, 38px);
+    grid-template-rows: repeat(3, 38px);
+    gap: 3px;
+  }
+  .mobile-deck .mobile-face-sm {
+    width: 38px;
+    height: 38px;
+    font-size: 14px;
+  }
+  .mobile-deck .mobile-face-md {
+    width: 46px;
+    height: 46px;
+    font-size: 16px;
+  }
+  .mobile-deck .mobile-face-lg {
+    width: 62px;
+    height: 62px;
+    font-size: 12px;
+  }
+  .mobile-deck .mobile-stick {
+    width: 92px;
+    height: 92px;
+  }
+  .mobile-deck .mobile-stick-knob {
+    width: 40px;
+    height: 40px;
+  }
+  .mobile-deck .mobile-center-btn {
+    padding: 6px 9px;
+    font-size: 9px;
+  }
+  .mobile-deck .mobile-zone-center {
+    gap: 6px;
+  }
+}
