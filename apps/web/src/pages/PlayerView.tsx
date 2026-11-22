@@ -596,7 +596,11 @@ export const PlayerView: React.FC<Props> = ({ t, session, userId, saveStore, onB
                   Aponte a câmera do celular (no mesmo Wi-Fi) para o QR Code acima.
                   <br />
                   <a
-                    href={roomCode ? `/pad/${roomCode}` : '/pad'}
+                    href={
+                      roomCode
+                        ? `${import.meta.env.BASE_URL}#/pad/${roomCode}`
+                        : `${import.meta.env.BASE_URL}#/pad`
+                    }
                     target="_blank"
                     rel="noreferrer"
                     style={{ color: 'var(--cyan)', textDecoration: 'underline' }}
@@ -794,7 +798,7 @@ export const PlayerView: React.FC<Props> = ({ t, session, userId, saveStore, onB
     );
   }
 
-  const toggleFullscreen = useCallback(() => {
+  const toggleFullscreen = () => {
     const el = stageWrapRef.current;
     if (!el) return;
     if (document.fullscreenElement) {
@@ -802,7 +806,7 @@ export const PlayerView: React.FC<Props> = ({ t, session, userId, saveStore, onB
     } else {
       void el.requestFullscreen?.().catch(() => {});
     }
-  }, []);
+  };
 
   // ==================== TELA DE JOGO LIMPA EM 60 FPS (DESKTOP / TV) ====================
   return (

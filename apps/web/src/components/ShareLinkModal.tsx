@@ -12,7 +12,15 @@ export const ShareLinkModal: React.FC<Props> = ({ onClose }) => {
   const [qrPng, setQrPng] = useState<string>('');
   const [copied, setCopied] = useState(false);
 
+  const PERMANENT_GH_PAGES_URL = 'https://drill23.github.io/video-game-for-all/';
+  const isAlreadyPublic =
+    typeof window !== 'undefined' &&
+    window.location.hostname !== 'localhost' &&
+    window.location.hostname !== '127.0.0.1' &&
+    !/^192\.168\.|^10\.|^172\./.test(window.location.hostname);
+
   const loadStatus = async () => {
+    if (isAlreadyPublic) return;
     try {
       const res = await globalThis.fetch('/api/tunnel/status');
       if (res.ok) {
@@ -33,13 +41,6 @@ export const ShareLinkModal: React.FC<Props> = ({ onClose }) => {
   useEffect(() => {
     void loadStatus();
   }, []);
-
-  const PERMANENT_GH_PAGES_URL = 'https://drill23.github.io/video-game-for-all/';
-  const isAlreadyPublic =
-    typeof window !== 'undefined' &&
-    window.location.hostname !== 'localhost' &&
-    window.location.hostname !== '127.0.0.1' &&
-    !/^192\.168\.|^10\.|^172\./.test(window.location.hostname);
 
   const shareTargetUrl = publicUrl || (isAlreadyPublic ? window.location.origin + window.location.pathname : PERMANENT_GH_PAGES_URL);
 
