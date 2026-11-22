@@ -4,22 +4,26 @@
 
 ---
 
-## O que já está funcionando (v0.2)
+## O que já está funcionando (v0.5)
 
-- **Loja / Catálogo VGFA com 52 Títulos e Capas Reais:**
-  - **44 Clássicos Lendários** do Atari 2600 ao PlayStation 2 (*Dragon Ball Z: Budokai Tenkaichi 3*, *GTA: San Andreas*, *God of War II*, *Resident Evil 4*, *Gran Turismo 4*, *Shadow of the Colossus*, *Super Mario World*, *Chrono Trigger*, *Crash Bandicoot*, *Super Mario 64*, *Sonic 2*, *Pokémon Emerald*, *River Raid* e mais) com capa real, nota, ano, desenvolvedora, sinopse, serial (`SLUS-21678`) e filtro/busca instantânea.
-  - **8 ROMs Reais Grátis & Open-Source (1 Clique)** rodando em emuladores WebAssembly reais (**Snes9x**, **FCEUmm**, **mGBA**, **Genesis Plus GX** e **Stella**).
-- **Motor Multi-Console Unificado:**
-  - **NES, SNES, Mega Drive, GBA, PS1:** RetroArch WebAssembly (`nostalgist`) com barra de progresso real e injeção direta do controle pelo celular.
-  - **Atari 2600, Nintendo 64 e PSP:** EmulatorJS WebAssembly (`stella2014`, `mupen64plus_next`, `ppsspp-thread-wasm`).
-  - **PlayStation 2:** Hub dedicado com **`@vgfa/disc`** (leitura de ISO de 4,5 GB por chunks de 256 KiB + Cache OPFS Sharded + parser `SYSTEM.CNF`), **`TabStationToo` (PCSX2 WebGPU 60 FPS)**, **`Play!.js` (Zero-BIOS WASM)** e script AOT [vgfa-ps2-recomp-pipeline.sh](scripts/vgfa-ps2-recomp-pipeline.sh).
-- **Proxy CORS-Free + Busca no Internet Archive:**
-  - `/api/proxy/stream`: streaming HTTP 206 Byte Ranges sem bloqueio CORS/COEP.
-  - `/api/archive/search` e `/api/archive/files`: identifica automaticamente ROMs/ISOs diretas vs arquivos `.zip`/`.7z` grandes ou bloqueados por login na origem.
-  - **Fontes Pessoais (URL ou Manifesto `.json`)**: vincule sua biblioteca pessoal diretamente aos jogos da loja.
-- **Celular como Controle Adaptativo (`/pad/:roomCode`) + Bluetooth:**
-  - Protocolo binário de **16 bytes** via WebRTC DataChannel + WebSocket binário.
-  - Skins adaptativas automáticas para todos os 9 consoles (do **Atari CX40** ao **PS2 DualShock 2** com 2 analógicos virtuais, pressão L2/R2 e vibração).
+- **Loja / Catálogo VGFA com 53 Títulos e Capas Reais:**
+  - **44 Clássicos Lendários** do Atari 2600 ao PlayStation 2 (*Dragon Ball Z: Budokai Tenkaichi 3*, *GTA: San Andreas*, *God of War II*, *Resident Evil 4*, *Gran Turismo 4*, *Shadow of the Colossus*, *Super Mario World*, *Chrono Trigger*, *Crash Bandicoot*, *Super Mario 64*, *Sonic 2*, *Pokémon Emerald*, *River Raid* e mais) com capa real, nota, ano, desenvolvedora, sinopse, serial (`SLUS-21678`) e **Smart Find** (filtra itens bloqueados/privados, valida HTTP 200/206 em tempo real e destaca a `⭐ Melhor Opção`).
+  - **9 ROMs Reais Grátis & Open-Source (1 Clique)** rodando imediatamente em emuladores WebAssembly reais (**Snes9x**, **FCEUmm**, **mGBA**, **Genesis Plus GX** e **Stella**).
+- **Motor Multi-Console Unificado (Atari 2600 → PlayStation 2):**
+  - **Atari 2600, NES, Mega Drive, SNES, GBA, Nintendo 64, PS1 e PSP:** motor unificado `VGFA-FastBoot` (EmulatorJS WebAssembly com cache local em IndexedDB, áudio desbloqueado no Safari/Chrome e injeção direta do controle pelo celular).
+  - **PlayStation 2 — Arquitetura Dual Engine + VGFA Hyper-Stream:**
+    - **⚡ VGFA-PS2 Turbo WebGPU (50–60 FPS no Chrome/Edge):** núcleo `PCSX2 WebAssembly` (EE/IOP/VU1 JIT + renderizador WebGPU HW com upscale 1x/2x/3x HD) em mesma origem (`/api/ps2-turbo/*`), alimentado direto pelo **VGFA Hyper-Stream** (sem baixar a ISO inteira!) + cofre local de BIOS em IndexedDB (1 única vez) + DualShock 2 analógico completo.
+    - **🚀 VGFA-PS2 Instantâneo Sem BIOS:** núcleo `Play.wasm` em mesma origem (`/api/ps2-core/*`) acoplado ao streaming de 1 MiB × 4x prefetch + cache LRU 96 MiB para teste imediato sem BIOS.
+    - **VGFA Hyper-Stream (`/api/proxy/stream`):** cache de blocos alinhados de **2 MiB em NVMe** + deduplicação in-flight + **prefetch paralelo 4x (6 MiB à frente)** para eliminar travamentos de rede em ISOs de 4 GB.
+    - **Pipeline AOT (Zero-BIOS 60 FPS nativo):** [vgfa-ps2-recomp-pipeline.sh](scripts/vgfa-ps2-recomp-pipeline.sh).
+- **📡 VGFA-Cast — Cloud Gaming P2P em 60 FPS (`/watch/:castCode`):**
+  - Transforme seu PC/Mac em um servidor pessoal de Cloud Gaming: clique em **Transmitir 60 FPS** dentro de qualquer jogo para gerar um link/QR WebRTC. Qualquer amigo (mesmo em um celular simples ou iPhone Safari) abre o link, baixa **0 MB**, vê vídeo em 60 FPS e joga pelo controle virtual enviando comandos binários de 16 bytes de volta!
+- **🌐 Link Público Mundial + Deploy 24/7 em Porta Única:**
+  - Botão **🌐 Link Público** na barra superior gera um link **HTTPS seguro** instantâneo (Cloudflare Quick Tunnel) com WebSocket unificado em `/ws` — funciona pelo 4G/5G em qualquer lugar do mundo.
+  - Pronto para hospedagem 24h em **Render**, **Fly.io**, **Railway** ou VPS usando o [Dockerfile](Dockerfile) ou `pnpm build && pnpm start:prod` (porta única com headers `COOP: same-origin` e `COEP: require-corp`).
+- **Controle Adaptativo Inteligente (Desktop + Mobile Nativo):**
+  - **No PC / TV:** tela pré-jogo para parear **Bluetooth / USB** (Gamepad API) ou ler **QR Code** no celular (`/pad/:roomCode`) com protocolo binário de 16 bytes e 9 skins automáticas (Atari CX40 → DualShock 2).
+  - **No Celular:** detecção automática de smartphone com controle virtual ergonômico dedicado (sem sobrepor o jogo em retrato; laterais translúcidas em paisagem).
 
 ---
 

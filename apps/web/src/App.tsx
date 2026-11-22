@@ -22,8 +22,10 @@ import { TRANSLATIONS } from './i18n/translations.js';
 import { AuthModal } from './components/AuthModal.js';
 import { GameDetailModal } from './components/GameDetailModal.js';
 import { SaveManagerModal } from './components/SaveManagerModal.js';
+import { ShareLinkModal } from './components/ShareLinkModal.js';
 import { ControllerPage } from './pages/ControllerPage.js';
 import { PlayerView, type ActiveSession, type PlayerMode } from './pages/PlayerView.js';
+import { WatchPage } from './pages/WatchPage.js';
 
 function resolveMode(consoleId: ConsoleId): PlayerMode {
   const def = CONSOLE_MAP[consoleId];
@@ -43,6 +45,10 @@ export const App: React.FC = () => {
     const code = pathname.startsWith('/pad/') ? decodeURIComponent(pathname.slice(5)) : undefined;
     return <ControllerPage initialRoomCode={code} />;
   }
+  if (pathname === '/watch' || pathname.startsWith('/watch/')) {
+    const code = pathname.startsWith('/watch/') ? decodeURIComponent(pathname.slice(7)) : undefined;
+    return <WatchPage initialCastCode={code} />;
+  }
 
   const auth = useMemo(() => new VgfaAuthStore(), []);
   const saveStore = useMemo(() => new VgfaSaveStore(), []);
@@ -56,6 +62,7 @@ export const App: React.FC = () => {
   const [activeSession, setActiveSession] = useState<ActiveSession | null>(null);
   const [showAuth, setShowAuth] = useState(false);
   const [showSaves, setShowSaves] = useState(false);
+  const [showShare, setShowShare] = useState(false);
 
   // Busca inteligente livre na web (somente fontes abertas verificadas HTTP 200!)
   const [webFinding, setWebFinding] = useState(false);
@@ -190,7 +197,10 @@ export const App: React.FC = () => {
                 }}
               />
             </label>
-            <a className="btn btn-sm btn-cyan" href="/pad" target="_blank" rel="noreferrer">
+            <button className="btn btn-sm btn-cyan" onClick={() => setShowShare(true)}>
+              🌐 Link Público
+            </button>
+            <a className="btn btn-sm btn-ghost" href="/pad" target="_blank" rel="noreferrer">
               📱 {t.phonePadMode}
             </a>
             <button className="btn btn-sm btn-ghost" onClick={() => setShowSaves(true)}>
@@ -546,6 +556,8 @@ export const App: React.FC = () => {
           onClose={() => setShowSaves(false)}
         />
       )}
+
+      {showShare && <ShareLinkModal onClose={() => setShowShare(false)} />}
     </>
   );
 };

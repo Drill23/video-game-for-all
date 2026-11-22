@@ -1,0 +1,828 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>VGFA-PS2 Turbo WebGPU (60 FPS)</title>
+    <style>
+      * { box-sizing: border-box; }
+      html, body {
+        margin: 0;
+        padding: 0;
+        width: 100%;
+        height: 100%;
+        background: #05060b;
+        color: #f8fafc;
+        font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Roboto, sans-serif;
+        overflow: hidden;
+      }
+      .shell {
+        position: relative;
+        width: 100%;
+        height: 100%;
+        display: flex;
+        flex-direction: column;
+      }
+      .hud {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        padding: 7px 12px;
+        background: rgba(11, 13, 21, 0.94);
+        border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+        font-size: 12px;
+        flex-wrap: wrap;
+        z-index: 20;
+      }
+      .hud-left, .hud-right {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        flex-wrap: wrap;
+      }
+      .pill {
+        padding: 3px 9px;
+        border-radius: 999px;
+        font-size: 11px;
+        font-weight: 700;
+        background: rgba(255, 181, 71, 0.14);
+        border: 1px solid rgba(255, 181, 71, 0.38);
+        color: #ffb547;
+      }
+      .pill.ok {
+        background: rgba(52, 211, 153, 0.14);
+        border-color: rgba(52, 211, 153, 0.42);
+        color: #6ee7b7;
+      }
+      .pill.cyan {
+        background: rgba(56, 189, 248, 0.14);
+        border-color: rgba(56, 189, 248, 0.42);
+        color: #7dd3fc;
+      }
+      .pill.warn {
+        background: rgba(251, 113, 133, 0.14);
+        border-color: rgba(251, 113, 133, 0.42);
+        color: #fda4af;
+      }
+      .mono {
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+        font-size: 11px;
+        color: #cbd5e1;
+      }
+      button, select, .btn-label {
+        background: #141926;
+        color: #f8fafc;
+        border: 1px solid rgba(255, 255, 255, 0.16);
+        border-radius: 8px;
+        padding: 5px 10px;
+        font-size: 11px;
+        font-weight: 700;
+        cursor: pointer;
+      }
+      button:hover, .btn-label:hover { border-color: #ffb547; }
+      .btn-amber {
+        background: linear-gradient(135deg, #ffb547, #ff6b6b);
+        color: #090b10;
+        border: none;
+        padding: 10px 18px;
+        font-size: 13px;
+      }
+      .stage {
+        position: relative;
+        flex: 1;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: #000;
+        overflow: hidden;
+      }
+      #turboCanvas {
+        max-width: 100%;
+        max-height: 100%;
+        width: 100%;
+        height: 100%;
+        object-fit: contain;
+        background: #000;
+        display: block;
+      }
+      #castCanvas {
+        position: fixed;
+        left: -9999px;
+        top: -9999px;
+        width: 640px;
+        height: 448px;
+        pointer-events: none;
+      }
+      .overlay {
+        position: absolute;
+        inset: 0;
+        background: rgba(7, 8, 13, 0.92);
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        text-align: center;
+        padding: 24px;
+        gap: 12px;
+        z-index: 15;
+      }
+      .overlay.hidden { display: none; }
+      .card {
+        max-width: 540px;
+        width: 100%;
+        background: #0f1320;
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        border-radius: 16px;
+        padding: 20px;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 12px;
+      }
+      .bar {
+        width: 100%;
+        max-width: 340px;
+        height: 8px;
+        border-radius: 999px;
+        background: rgba(255, 255, 255, 0.1);
+        overflow: hidden;
+      }
+      .bar-fill {
+        height: 100%;
+        width: 0%;
+        background: linear-gradient(90deg, #ffb547, #38bdf8);
+        transition: width 0.2s ease;
+      }
+      .note {
+        font-size: 12px;
+        color: #94a3b8;
+        line-height: 1.5;
+        margin: 0;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="shell">
+      <div class="hud">
+        <div class="hud-left">
+          <span class="pill" id="modeBadge">⚡ PCSX2 WebGPU Turbo</span>
+          <span class="mono" id="statusText">Inicializando motor 60 FPS...</span>
+        </div>
+        <div class="hud-right">
+          <span class="mono" id="fpsText">0 FPS • 0%</span>
+          <select id="upscaleSel" title="Resolução interna">
+            <option value="1">1x Nativo</option>
+            <option value="2" selected>2x HD (720p)</option>
+            <option value="3">3x Full HD</option>
+          </select>
+          <label class="btn-label" title="Trocar arquivo BIOS PS2">
+            💾 BIOS
+            <input type="file" id="biosSwapInput" accept=".bin,.rom,.rom0,.bios" style="display:none" />
+          </label>
+          <button id="audioBtn" title="Ativar / Silenciar Som">🔊 Som</button>
+          <button id="fsBtn" title="Tela Cheia">⛶</button>
+        </div>
+      </div>
+
+      <div class="stage" id="stage">
+        <canvas id="turboCanvas" width="640" height="448"></canvas>
+        <canvas id="castCanvas" width="640" height="448"></canvas>
+
+        <!-- Overlay de Progresso / BIOS Vault -->
+        <div class="overlay" id="overlay">
+          <div class="card">
+            <strong id="ovTitle" style="font-size: 16px;">⚡ VGFA-PS2 Turbo WebGPU (50–60 FPS)</strong>
+            <p class="note" id="ovDesc">
+              Baixando núcleo PCSX2 WebAssembly + WebGPU (armazenado no cache do seu servidor após o 1º uso) e conectando disco via VGFA Hyper-Stream NVMe...
+            </p>
+            <div class="bar" id="ovBarWrap"><div class="bar-fill" id="ovBarFill"></div></div>
+            <div id="biosPrompt" style="display: none; flex-direction: column; align-items: center; gap: 10px; width: 100%; margin-top: 6px;">
+              <p class="note" style="color: #e2e8f0;">
+                O motor <strong>PCSX2 WebGPU 60 FPS</strong> exige o arquivo <strong>BIOS do PS2 (.bin)</strong> apenas <strong>1 única vez</strong> — ele fica salvo localmente no seu navegador (IndexedDB) e nunca é enviado para a internet.
+              </p>
+              <label class="btn-label btn-amber">
+                📂 Selecionar BIOS do PS2 (.bin)
+                <input type="file" id="biosInput" accept=".bin,.rom,.rom0,.bios" style="display:none" />
+              </label>
+              <p class="note" style="font-size: 11px;">
+                Dica: extraia a BIOS do seu próprio PlayStation 2 (ex: <code>SCPH-70012.bin</code> ou <code>scph39001.bin</code>). O jogo selecionado já está pronto para iniciar via streaming!
+              </p>
+            </div>
+            <div id="browserWarn" class="pill warn" style="display:none;"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <script>
+      (function () {
+        const ASSET_BASE = '/api/ps2-turbo/';
+        const BIOS_DIR = '/bios';
+        const DISC_DIR = '/disc';
+        const FD_SEQ = 0, FD_WIDTH = 1, FD_HEIGHT = 2, FD_PIXELS = 3, FD_VSYNC = 4, FD_WORDS = 5;
+        const MAX_FRAME_DIM = 8192;
+
+        const PAD_INPUTS = [
+          'Up', 'Right', 'Down', 'Left', 'Triangle', 'Circle', 'Cross', 'Square',
+          'Select', 'Start', 'L1', 'L2', 'R1', 'R2', 'L3', 'R3', 'Analog',
+          'LUp', 'LRight', 'LDown', 'LLeft', 'RUp', 'RRight', 'RDown', 'RLeft'
+        ];
+        const PAD_IDX = Object.fromEntries(PAD_INPUTS.map((n, i) => [n, i]));
+
+        // Bits de @vgfa/pad (packages/vgfa-pad/src/types.ts)
+        const PAD_BIT = {
+          UP: 1 << 0, DOWN: 1 << 1, LEFT: 1 << 2, RIGHT: 1 << 3,
+          SOUTH: 1 << 4, EAST: 1 << 5, WEST: 1 << 6, NORTH: 1 << 7,
+          L1: 1 << 8, R1: 1 << 9, L2: 1 << 10, R2: 1 << 11,
+          SELECT: 1 << 12, START: 1 << 13, L3: 1 << 14, R3: 1 << 15,
+        };
+
+        const KB_TO_PAD = {
+          ArrowUp: 'Up', ArrowDown: 'Down', ArrowLeft: 'Left', ArrowRight: 'Right',
+          KeyZ: 'Cross', KeyX: 'Circle', KeyA: 'Square', KeyS: 'Triangle',
+          Enter: 'Start', NumpadEnter: 'Start', Backspace: 'Select', KeyV: 'Select',
+          KeyQ: 'L1', KeyE: 'R1', Digit1: 'L2', Digit2: 'R2', Digit3: 'L3', Digit4: 'R3',
+          KeyW: 'LUp', KeyF: 'LLeft', KeyG: 'LDown', KeyH: 'LRight',
+          KeyI: 'RUp', KeyJ: 'RLeft', KeyK: 'RDown', KeyL: 'RRight',
+        };
+
+        const els = {
+          canvas: document.getElementById('turboCanvas'),
+          castCanvas: document.getElementById('castCanvas'),
+          stage: document.getElementById('stage'),
+          overlay: document.getElementById('overlay'),
+          ovTitle: document.getElementById('ovTitle'),
+          ovDesc: document.getElementById('ovDesc'),
+          ovBarWrap: document.getElementById('ovBarWrap'),
+          ovBarFill: document.getElementById('ovBarFill'),
+          biosPrompt: document.getElementById('biosPrompt'),
+          browserWarn: document.getElementById('browserWarn'),
+          modeBadge: document.getElementById('modeBadge'),
+          statusText: document.getElementById('statusText'),
+          fpsText: document.getElementById('fpsText'),
+          upscaleSel: document.getElementById('upscaleSel'),
+          biosInput: document.getElementById('biosInput'),
+          biosSwapInput: document.getElementById('biosSwapInput'),
+          audioBtn: document.getElementById('audioBtn'),
+          fsBtn: document.getElementById('fsBtn'),
+        };
+
+        let wasmMemory = null;
+        let api = null;
+        let runtimeReady = false;
+        let booted = false;
+        let pendingDisc = null; // { url?, file?, filename }
+        let openedDisc = null;  // { path, name, size }
+        let savedBios = null;   // { name, bytes: Uint8Array }
+        let discWorker = null;
+        let discAttached = false;
+        let discReqId = 1;
+        const discPending = new Map();
+
+        let displayKind = '';
+        let displayCtx = null;
+        let castMirrorEnabled = false;
+        const castCtx = els.castCanvas.getContext('2d');
+        let framePtr = 0;
+        let lastFrameSeq = 0;
+        let frameImgData = null;
+
+        let audioCtx = null;
+        let audioGain = null;
+        let audioStarted = false;
+        let audioMuted = false;
+
+        const kbState = new Float32Array(PAD_INPUTS.length);
+        const extState = new Float32Array(PAD_INPUTS.length);
+        const sentState = new Float32Array(PAD_INPUTS.length).fill(-1);
+
+        // Exposto para o pai (VGFA-Cast) capturar 60 FPS mesmo com WebGPU bitmaprenderer!
+        window.__vgfaEnableCastMirror = function (on) {
+          castMirrorEnabled = !!on;
+          return els.castCanvas;
+        };
+        window.__vgfaGetCastCanvas = function () {
+          return castMirrorEnabled ? els.castCanvas : els.canvas;
+        };
+
+        function setStatus(txt) {
+          els.statusText.textContent = txt;
+        }
+
+        function setProgress(pct) {
+          els.ovBarFill.style.width = Math.max(0, Math.min(100, pct)) + '%';
+        }
+
+        // ==================== IndexedDB BIOS Vault (100% Local) ====================
+        function openBiosDb() {
+          return new Promise((resolve, reject) => {
+            const req = indexedDB.open('vgfa-ps2-bios-vault', 1);
+            req.onupgradeneeded = () => {
+              if (!req.result.objectStoreNames.contains('bios')) {
+                req.result.createObjectStore('bios');
+              }
+            };
+            req.onsuccess = () => resolve(req.result);
+            req.onerror = () => reject(req.error);
+          });
+        }
+
+        async function loadSavedBios() {
+          try {
+            const db = await openBiosDb();
+            return await new Promise((resolve) => {
+              const tx = db.transaction('bios', 'readonly');
+              const req = tx.objectStore('bios').get('primary');
+              req.onsuccess = () => {
+                const rec = req.result;
+                if (rec && rec.bytes && rec.name) {
+                  resolve({ name: rec.name, bytes: new Uint8Array(rec.bytes) });
+                } else {
+                  resolve(null);
+                }
+              };
+              req.onerror = () => resolve(null);
+            });
+          } catch {
+            return null;
+          }
+        }
+
+        async function persistBios(name, bytes) {
+          try {
+            const db = await openBiosDb();
+            await new Promise((resolve, reject) => {
+              const tx = db.transaction('bios', 'readwrite');
+              tx.objectStore('bios').put({ name, bytes }, 'primary');
+              tx.oncomplete = () => resolve();
+              tx.onerror = () => reject(tx.error);
+            });
+            try { localStorage.setItem('vgfa:has_ps2_bios', '1'); } catch {}
+          } catch {}
+        }
+
+        function sanitizeFileName(name, fallback) {
+          const base = String(name || fallback).replace(/^.*[\\/]/, '').replace(/[^A-Za-z0-9._ -]+/g, '_').trim();
+          return base.slice(0, 96) || fallback;
+        }
+
+        // ==================== Display (WebGPU bitmaprenderer + 2D Fallback) ====================
+        function ensureDisplayContext(kind) {
+          if (displayKind === kind && displayCtx) return displayCtx;
+          if (displayKind) {
+            const fresh = els.canvas.cloneNode(false);
+            els.canvas.replaceWith(fresh);
+            els.canvas = fresh;
+          }
+          displayKind = kind;
+          displayCtx = kind === '2d'
+            ? els.canvas.getContext('2d', { alpha: false })
+            : els.canvas.getContext('bitmaprenderer');
+          return displayCtx;
+        }
+
+        function onFramePort(port) {
+          els.modeBadge.textContent = '⚡ WebGPU HW 60 FPS';
+          els.modeBadge.className = 'pill ok';
+          port.onmessage = (e) => {
+            const m = e.data;
+            if (!m) return;
+            if (m.type === 'frame' && m.bitmap) {
+              const bmp = m.bitmap;
+              if (els.canvas.width !== bmp.width || els.canvas.height !== bmp.height) {
+                els.canvas.width = bmp.width;
+                els.canvas.height = bmp.height;
+              }
+              if (castMirrorEnabled && castCtx) {
+                if (els.castCanvas.width !== bmp.width || els.castCanvas.height !== bmp.height) {
+                  els.castCanvas.width = bmp.width;
+                  els.castCanvas.height = bmp.height;
+                }
+                castCtx.drawImage(bmp, 0, 0);
+              }
+              const ctx = ensureDisplayContext('bitmaprenderer');
+              if (ctx) ctx.transferFromImageBitmap(bmp);
+              else bmp.close();
+              els.overlay.classList.add('hidden');
+            } else if (m.type === 'fallback') {
+              els.modeBadge.textContent = '🖥️ 2D Software (Use Chrome p/ WebGPU)';
+              els.modeBadge.className = 'pill warn';
+            }
+          };
+        }
+
+        function drawLoop2d() {
+          requestAnimationFrame(drawLoop2d);
+          if (!runtimeReady || !framePtr || displayKind === 'bitmaprenderer') return;
+          const buf = wasmMemory ? wasmMemory.buffer : (window.Module && window.Module.HEAPU8 ? window.Module.HEAPU8.buffer : null);
+          if (!buf || framePtr + FD_WORDS * 4 > buf.byteLength) return;
+          const desc = new Uint32Array(buf, framePtr, FD_WORDS);
+          const seq = Atomics.load(desc, FD_SEQ);
+          if (seq === 0 || seq === lastFrameSeq) return;
+          const w = Atomics.load(desc, FD_WIDTH);
+          const h = Atomics.load(desc, FD_HEIGHT);
+          const pixels = Atomics.load(desc, FD_PIXELS);
+          const bytes = w * h * 4;
+          if (!w || !h || w > MAX_FRAME_DIM || h > MAX_FRAME_DIM || !pixels || pixels + bytes > buf.byteLength) {
+            lastFrameSeq = seq;
+            return;
+          }
+          if (!frameImgData || frameImgData.width !== w || frameImgData.height !== h) {
+            frameImgData = new ImageData(w, h);
+          }
+          frameImgData.data.set(new Uint8Array(buf, pixels, bytes));
+          lastFrameSeq = seq;
+          const ctx = ensureDisplayContext('2d');
+          if (els.canvas.width !== w || els.canvas.height !== h) {
+            els.canvas.width = w;
+            els.canvas.height = h;
+          }
+          ctx.putImageData(frameImgData, 0, 0);
+          if (castMirrorEnabled && castCtx) {
+            if (els.castCanvas.width !== w || els.castCanvas.height !== h) {
+              els.castCanvas.width = w;
+              els.castCanvas.height = h;
+            }
+            castCtx.putImageData(frameImgData, 0, 0);
+          }
+          els.overlay.classList.add('hidden');
+        }
+
+        // ==================== Áudio WebAudio Worklet ====================
+        function unlockAudio() {
+          try {
+            if (!audioCtx) {
+              audioCtx = new AudioContext({ sampleRate: 48000, latencyHint: 'interactive' });
+              audioGain = audioCtx.createGain();
+              audioGain.gain.value = audioMuted ? 0 : 0.9;
+              audioGain.connect(audioCtx.destination);
+            }
+            if (audioCtx.state === 'suspended') {
+              audioCtx.resume().catch(() => {});
+            }
+            if (runtimeReady && !audioStarted && window.Module && typeof window.Module._pcsx2web_audio_start === 'function') {
+              audioStarted = true;
+              window.Module.pcsx2webAudioContext = audioCtx;
+              window.Module.pcsx2webAudioReady = (node) => {
+                if (node && audioGain) node.connect(audioGain);
+              };
+              window.Module._pcsx2web_audio_start();
+            }
+          } catch {}
+        }
+
+        els.audioBtn.addEventListener('click', () => {
+          audioMuted = !audioMuted;
+          els.audioBtn.textContent = audioMuted ? '🔇 Mudo' : '🔊 Som';
+          if (audioGain) audioGain.gain.value = audioMuted ? 0 : 0.9;
+          unlockAudio();
+        });
+
+        els.fsBtn.addEventListener('click', () => {
+          if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+          else els.stage.requestFullscreen?.().catch(() => {});
+        });
+
+        els.upscaleSel.addEventListener('change', () => {
+          const n = Number(els.upscaleSel.value) || 1;
+          if (api && api.setUpscale) api.setUpscale(n);
+        });
+
+        window.addEventListener('pointerdown', unlockAudio, { passive: true });
+        window.addEventListener('keydown', unlockAudio, { passive: true });
+
+        // ==================== Disc Worker (VGFA Hyper-Stream URL / File) ====================
+        function callDiscWorker(msg) {
+          return new Promise((resolve) => {
+            const id = discReqId++;
+            discPending.set(id, resolve);
+            discWorker.postMessage({ ...msg, id });
+          });
+        }
+
+        async function attachDiscWorker() {
+          const M = window.Module;
+          if (!M || typeof M._pcsx2web_disc_block !== 'function' || !wasmMemory) {
+            throw new Error('WASM memory ou disc_block ausente.');
+          }
+          discWorker = new Worker(ASSET_BASE + 'disc-worker.js');
+          discWorker.onmessage = (e) => {
+            const m = e.data || {};
+            if (m.type === 'reply' && discPending.has(m.id)) {
+              const fn = discPending.get(m.id);
+              discPending.delete(m.id);
+              fn(m);
+            }
+          };
+          const block = M._pcsx2web_disc_block() >>> 0;
+          const reply = await callDiscWorker({ type: 'attach', memory: wasmMemory, block });
+          if (!reply.ok) {
+            throw new Error(reply.error?.message || 'Falha ao acoplar leitor de disco PS2.');
+          }
+          discAttached = true;
+          if (pendingDisc) {
+            await mountDiscSource(pendingDisc);
+          }
+        }
+
+        async function mountDiscSource(spec) {
+          pendingDisc = spec;
+          if (!runtimeReady || !discAttached) return;
+
+          const cleanName = sanitizeFileName(spec.filename || (spec.file && spec.file.name) || 'game.iso', 'game.iso');
+          setStatus(`Montando ${cleanName} via VGFA Hyper-Stream...`);
+          els.ovDesc.textContent = `Conectando disco ${cleanName} sob demanda (sem baixar a ISO inteira)...`;
+
+          let msg;
+          if (spec.file) {
+            msg = { type: 'open', file: spec.file, name: cleanName };
+          } else if (spec.url) {
+            const absUrl = new URL(spec.url, window.location.origin).href;
+            msg = { type: 'open', url: absUrl, name: cleanName };
+          } else {
+            return;
+          }
+
+          const reply = await callDiscWorker(msg);
+          if (!reply.ok) {
+            els.ovTitle.textContent = 'Erro ao montar disco no PCSX2 WebGPU';
+            els.ovDesc.textContent = reply.error?.message || 'Falha ao abrir a URL/ISO do disco.';
+            els.overlay.classList.remove('hidden');
+            return;
+          }
+
+          const FS = window.Module.FS;
+          if (!FS.analyzePath(DISC_DIR).exists) FS.mkdir(DISC_DIR);
+          const discPath = `${DISC_DIR}/${cleanName}`;
+          FS.writeFile(discPath, new Uint8Array(0));
+          openedDisc = {
+            path: discPath,
+            name: cleanName,
+            size: reply.status?.disc?.size || 0,
+          };
+          setStatus(`Disco pronto: ${cleanName}`);
+          tryAutoBoot();
+        }
+
+        function tryAutoBoot() {
+          if (!runtimeReady || !openedDisc) return;
+          if (!savedBios) {
+            els.ovTitle.textContent = 'Falta apenas sua BIOS PS2 (1 única vez)';
+            els.ovDesc.textContent = `Disco pronto: ${openedDisc.name} (VGFA Hyper-Stream NVMe conectado!).`;
+            els.ovBarWrap.style.display = 'none';
+            els.biosPrompt.style.display = 'flex';
+            els.overlay.classList.remove('hidden');
+            setStatus('Aguardando BIOS PS2 (.bin)...');
+            return;
+          }
+          if (booted) return;
+          booted = true;
+
+          const FS = window.Module.FS;
+          if (!FS.analyzePath(BIOS_DIR).exists) FS.mkdir(BIOS_DIR);
+          const biosName = sanitizeFileName(savedBios.name, 'ps2_bios.bin');
+          FS.writeFile(`${BIOS_DIR}/${biosName}`, savedBios.bytes);
+
+          els.biosPrompt.style.display = 'none';
+          els.ovTitle.textContent = `Iniciando ${openedDisc.name} em 60 FPS...`;
+          els.ovDesc.textContent = 'Compilando shaders WebGPU + EE/VU1 JIT...';
+          unlockAudio();
+
+          if (api.surfaceSize) {
+            const rect = els.stage.getBoundingClientRect();
+            api.surfaceSize(Math.max(640, Math.round(rect.width)), Math.max(448, Math.round(rect.height)), window.devicePixelRatio || 1);
+          }
+          if (api.setUpscale) api.setUpscale(Number(els.upscaleSel.value) || 2);
+
+          const rc = window.Module.ccall('pcsx2web_boot_disc', 'number', ['string', 'string', 'number'], [biosName, openedDisc.path, 0]);
+          if (rc !== 0) {
+            booted = false;
+            els.ovTitle.textContent = 'Não foi possível iniciar o disco';
+            els.ovDesc.textContent = `pcsx2web_boot_disc retornou código ${rc}. Verifique se o arquivo BIOS .bin é válido.`;
+            els.biosPrompt.style.display = 'flex';
+            els.overlay.classList.remove('hidden');
+            return;
+          }
+          setStatus(`Rodando ${openedDisc.name} • VGFA Hyper-Stream NVMe`);
+          setTimeout(() => els.overlay.classList.add('hidden'), 1200);
+        }
+
+        async function handleBiosFile(file) {
+          if (!file) return;
+          const bytes = new Uint8Array(await file.arrayBuffer());
+          if (bytes.byteLength < 256 * 1024) {
+            els.ovDesc.textContent = 'Arquivo pequeno demais para ser uma BIOS de PS2 (mínimo 512 KB / 4 MB).';
+            return;
+          }
+          savedBios = { name: file.name, bytes };
+          await persistBios(file.name, bytes);
+          booted = false;
+          unlockAudio();
+          tryAutoBoot();
+        }
+
+        els.biosInput.addEventListener('change', (e) => handleBiosFile(e.target.files?.[0]));
+        els.biosSwapInput.addEventListener('change', (e) => handleBiosFile(e.target.files?.[0]));
+
+        // ==================== DualShock 2 Input (Teclado + Celular QR + Bluetooth + Cast) ====================
+        function syncPads() {
+          if (!api || !runtimeReady) return;
+          for (let i = 0; i < PAD_INPUTS.length; i++) {
+            const v = Math.max(kbState[i], extState[i]);
+            const rounded = Math.round(v * 65535) / 65535;
+            if (rounded !== sentState[i]) {
+              if (api.pad(0, i, rounded)) sentState[i] = rounded;
+            }
+          }
+        }
+
+        window.addEventListener('keydown', (e) => {
+          const padName = KB_TO_PAD[e.code];
+          if (!padName) return;
+          e.preventDefault();
+          kbState[PAD_IDX[padName]] = 1;
+          syncPads();
+        });
+        window.addEventListener('keyup', (e) => {
+          const padName = KB_TO_PAD[e.code];
+          if (!padName) return;
+          e.preventDefault();
+          kbState[PAD_IDX[padName]] = 0;
+          syncPads();
+        });
+
+        function applyExternalPadState(s) {
+          extState.fill(0);
+          if (!s) return;
+          const b = s.buttons || 0;
+          if (b & PAD_BIT.UP) extState[PAD_IDX.Up] = 1;
+          if (b & PAD_BIT.RIGHT) extState[PAD_IDX.Right] = 1;
+          if (b & PAD_BIT.DOWN) extState[PAD_IDX.Down] = 1;
+          if (b & PAD_BIT.LEFT) extState[PAD_IDX.Left] = 1;
+          if (b & PAD_BIT.NORTH) extState[PAD_IDX.Triangle] = 1;
+          if (b & PAD_BIT.EAST) extState[PAD_IDX.Circle] = 1;
+          if (b & PAD_BIT.SOUTH) extState[PAD_IDX.Cross] = 1;
+          if (b & PAD_BIT.WEST) extState[PAD_IDX.Square] = 1;
+          if (b & PAD_BIT.SELECT) extState[PAD_IDX.Select] = 1;
+          if (b & PAD_BIT.START) extState[PAD_IDX.Start] = 1;
+          if (b & PAD_BIT.L1) extState[PAD_IDX.L1] = 1;
+          if (b & PAD_BIT.R1) extState[PAD_IDX.R1] = 1;
+          if (b & PAD_BIT.L3) extState[PAD_IDX.L3] = 1;
+          if (b & PAD_BIT.R3) extState[PAD_IDX.R3] = 1;
+          extState[PAD_IDX.L2] = Math.max(s.l2Pressure || 0, (b & PAD_BIT.L2) ? 1 : 0);
+          extState[PAD_IDX.R2] = Math.max(s.r2Pressure || 0, (b & PAD_BIT.R2) ? 1 : 0);
+
+          const lx = s.lx || 0, ly = s.ly || 0, rx = s.rx || 0, ry = s.ry || 0;
+          if (ly < -0.05) extState[PAD_IDX.LUp] = Math.min(1, -ly);
+          if (ly > 0.05) extState[PAD_IDX.LDown] = Math.min(1, ly);
+          if (lx < -0.05) extState[PAD_IDX.LLeft] = Math.min(1, -lx);
+          if (lx > 0.05) extState[PAD_IDX.LRight] = Math.min(1, lx);
+          if (ry < -0.05) extState[PAD_IDX.RUp] = Math.min(1, -ry);
+          if (ry > 0.05) extState[PAD_IDX.RDown] = Math.min(1, ry);
+          if (rx < -0.05) extState[PAD_IDX.RLeft] = Math.min(1, -rx);
+          if (rx > 0.05) extState[PAD_IDX.RRight] = Math.min(1, rx);
+
+          syncPads();
+        }
+
+        window.addEventListener('message', (ev) => {
+          const msg = ev.data;
+          if (!msg || typeof msg !== 'object') return;
+          if (msg.type === 'vgfa-ps2-boot') {
+            booted = false;
+            void mountDiscSource(msg);
+          } else if (msg.type === 'vgfa-ps2-pad') {
+            applyExternalPadState(msg.state);
+          } else if (msg.type === 'vgfa-cast-mirror') {
+            castMirrorEnabled = !!msg.enabled;
+          }
+        });
+
+        // ==================== Bootstrap Emscripten PCSX2-WASM ====================
+        function findMemoryIn(obj) {
+          if (!obj) return null;
+          for (const v of Object.values(obj)) {
+            if (v instanceof WebAssembly.Memory) return v;
+          }
+          return null;
+        }
+
+        async function initRuntime() {
+          savedBios = await loadSavedBios();
+
+          if (!window.crossOriginIsolated) {
+            els.browserWarn.textContent = '⚠️ SharedArrayBuffer inativo — recarregue com Cmd+Shift+R.';
+            els.browserWarn.style.display = 'inline-block';
+            return;
+          }
+
+          const hasJspi = typeof WebAssembly === 'object' &&
+            typeof WebAssembly.Suspending === 'function' &&
+            typeof WebAssembly.promising === 'function';
+          if (!navigator.gpu || !hasJspi) {
+            els.browserWarn.textContent = '💡 Safari/WebKit não possui WebGPU + JSPI completo — abra no Google Chrome ou Edge para 60 FPS reais!';
+            els.browserWarn.style.display = 'inline-block';
+          }
+
+          window.Module = {
+            arguments: [],
+            tstFramePort: onFramePort,
+            tstGpuFallback: () => {
+              els.modeBadge.textContent = '🖥️ 2D Fallback (Use Chrome p/ WebGPU)';
+              els.modeBadge.className = 'pill warn';
+            },
+            tstGpuMode: () => {},
+            locateFile: (p) => ASSET_BASE + p,
+            print: () => {},
+            printErr: () => {},
+            instantiateWasm(imports, receiveInstance) {
+              (async () => {
+                for (const ns of Object.values(imports)) {
+                  wasmMemory = wasmMemory || findMemoryIn(ns);
+                }
+                const resp = await fetch(ASSET_BASE + 'pcsx2-wasm.wasm', { credentials: 'same-origin' });
+                if (!resp.ok) throw new Error('HTTP ' + resp.status + ' ao baixar pcsx2-wasm.wasm');
+                const total = Number(resp.headers.get('Content-Length')) || 11_050_000;
+                let loaded = 0;
+                let source = resp;
+                if (resp.body && typeof TransformStream === 'function') {
+                  const counter = new TransformStream({
+                    transform(chunk, ctrl) {
+                      loaded += chunk.byteLength;
+                      setProgress((loaded / total) * 85);
+                      ctrl.enqueue(chunk);
+                    },
+                  });
+                  source = new Response(resp.body.pipeThrough(counter), {
+                    headers: { 'Content-Type': 'application/wasm' },
+                  });
+                }
+                let result;
+                try {
+                  result = await WebAssembly.instantiateStreaming(source, imports);
+                } catch {
+                  const retry = await fetch(ASSET_BASE + 'pcsx2-wasm.wasm', { credentials: 'same-origin' });
+                  result = await WebAssembly.instantiate(await retry.arrayBuffer(), imports);
+                }
+                setProgress(95);
+                wasmMemory = wasmMemory || findMemoryIn(result.instance.exports);
+                receiveInstance(result.instance, result.module);
+              })().catch((err) => {
+                els.ovTitle.textContent = 'Erro ao carregar PCSX2 WASM';
+                els.ovDesc.textContent = err.message || String(err);
+              });
+              return {};
+            },
+            onRuntimeInitialized() {
+              const M = window.Module;
+              if (!wasmMemory && M.wasmMemory instanceof WebAssembly.Memory) wasmMemory = M.wasmMemory;
+              api = {
+                speed: () => (M._pcsx2web_speed ? M._pcsx2web_speed() : 0),
+                vps: () => (M._pcsx2web_vps ? M._pcsx2web_vps() : 0),
+                pad: (port, idx, val) => M._pcsx2web_pad(port, idx, val) === 1,
+                frame: () => M._pcsx2web_frame() >>> 0,
+                surfaceSize: (w, h, s) => M._pcsx2web_surface_size && M._pcsx2web_surface_size(w, h, s),
+                setUpscale: (n) => M._pcsx2web_set_upscale && M._pcsx2web_set_upscale(n),
+              };
+              framePtr = api.frame();
+              runtimeReady = true;
+              setProgress(100);
+              setStatus('Núcleo PCSX2 WebGPU pronto!');
+              requestAnimationFrame(drawLoop2d);
+              setInterval(() => {
+                if (!api || !booted) return;
+                const vps = Math.round(api.vps() || 0);
+                const spd = Math.round(api.speed() || 0);
+                els.fpsText.textContent = `${vps} FPS • ${spd}%`;
+              }, 500);
+              attachDiscWorker()
+                .then(() => {
+                  window.parent?.postMessage({ type: 'vgfa-ps2-runner-ready', engine: 'turbo' }, '*');
+                  if (!pendingDisc && !savedBios) {
+                    els.ovBarWrap.style.display = 'none';
+                    els.biosPrompt.style.display = 'flex';
+                  }
+                })
+                .catch((err) => {
+                  els.ovTitle.textContent = 'Erro no leitor de disco PS2';
+                  els.ovDesc.textContent = err.message || String(err);
+                });
+            },
+          };
+
+          const s = document.createElement('script');
+          s.src = ASSET_BASE + 'pcsx2-wasm.js';
+          s.async = true;
+          s.onerror = () => {
+            els.ovTitle.textContent = 'Falha ao baixar pcsx2-wasm.js';
+            els.ovDesc.textContent = 'Verifique a conexão do servidor VGFA (/api/ps2-turbo/pcsx2-wasm.js).';
+          };
+          document.body.appendChild(s);
+        }
+
+        void initRuntime();
+      })();
+    </script>
+  </body>
+</html>

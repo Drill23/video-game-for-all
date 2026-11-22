@@ -8,9 +8,7 @@ import { GamepadPhoneView } from '../components/GamepadPhoneView.js';
 
 function getSignalingUrl(): string {
   const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const host = window.location.hostname || '127.0.0.1';
-  const port = import.meta.env.VITE_SIGNALING_PORT || '8787';
-  return `${proto}//${host}:${port}`;
+  return `${proto}//${window.location.host}/ws`;
 }
 
 interface Props {

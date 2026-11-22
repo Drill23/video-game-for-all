@@ -16,6 +16,7 @@ interface Props {
   initialUrl?: string | null;
   romFilename?: string;
   externalPadState?: PadState | null;
+  onIframeChange?: (el: HTMLIFrameElement | null) => void;
 }
 
 /** Mapeamento oficial do DualShock 2 no núcleo Play!.wasm (mesma origem) */
@@ -45,6 +46,14 @@ function fmtSize(bytes: number): string {
   return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
 }
 
+function hasSavedPs2Bios(): boolean {
+  try {
+    return localStorage.getItem('vgfa:has_ps2_bios') === '1';
+  } catch {
+    return false;
+  }
+}
+
 export const Ps2LabPanel: React.FC<Props> = ({
   gameTitle = 'PlayStation 2',
   expectedSerial,
@@ -52,9 +61,13 @@ export const Ps2LabPanel: React.FC<Props> = ({
   initialUrl,
   romFilename,
   externalPadState,
+  onIframeChange,
 }) => {
   const [caps, setCaps] = useState<WebGpuCapabilities | null>(null);
-  const [engineMode, setEngineMode] = useState<'vgfa-native' | 'pcsx2-webgpu' | 'disc'>('vgfa-native');
+  // Se o usuário já salvou sua BIOS PS2 uma vez, abre direto no Modo Turbo 60 FPS!
+  const [engineMode, setEngineMode] = useState<'vgfa-native' | 'pcsx2-webgpu' | 'disc'>(() =>
+    hasSavedPs2Bios() ? 'pcsx2-webgpu' : 'vgfa-native',
+  );
   const [activeFile, setActiveFile] = useState<File | null>(initialFile ?? null);
   const [activeUrl, setActiveUrl] = useState<string | null>(initialUrl ?? null);
   const [runnerKey, setRunnerKey] = useState(1);
@@ -69,6 +82,10 @@ export const Ps2LabPanel: React.FC<Props> = ({
   useEffect(() => {
     void probePs2WebCapabilities().then(setCaps);
   }, []);
+
+  useEffect(() => {
+    onIframeChange?.(engineMode === 'disc' ? null : iframeRef.current);
+  }, [engineMode, runnerKey, onIframeChange]);
 
   // Valida metadados ISO-9660 em paralelo via @vgfa/disc
   useEffect(() => {
@@ -104,9 +121,9 @@ export const Ps2LabPanel: React.FC<Props> = ({
     };
   }, [activeFile, activeUrl, romFilename]);
 
-  // Envia automaticamente o disco (File local ou URL HTTP Range) para o /ps2-runner.html assim que o iframe avisar que está pronto!
+  // Envia automaticamente o disco (File local ou URL HTTP Range via VGFA Hyper-Stream) para o motor PS2 ativo!
   useEffect(() => {
-    if (engineMode !== 'vgfa-native') return;
+    if (engineMode === 'disc') return;
 
     const sendBootToIframe = () => {
       const win = iframeRef.current?.contentWindow;
@@ -133,11 +150,17 @@ export const Ps2LabPanel: React.FC<Props> = ({
     return () => window.removeEventListener('message', onMsg);
   }, [engineMode, activeFile, activeUrl, romFilename, runnerKey]);
 
-  // Ponte em tempo real do Celular DualShock 2 (QR Code) -> /ps2-runner.html!
+  // Ponte em tempo real do Celular DualShock 2 / Bluetooth / VGFA-Cast -> motor PS2 ativo!
   useEffect(() => {
-    if (!externalPadState || engineMode !== 'vgfa-native') return;
+    if (!externalPadState || engineMode === 'disc') return;
     const win = iframeRef.current?.contentWindow;
     if (!win) return;
+
+    // Motor Turbo (PCSX2 WebGPU) recebe estado analógico completo (25 entradas DualShock 2!)
+    if (engineMode === 'pcsx2-webgpu') {
+      win.postMessage({ type: 'vgfa-ps2-pad', state: externalPadState }, '*');
+      return;
+    }
 
     let mask = externalPadState.buttons;
     if (externalPadState.lx < -0.4) mask |= PAD_BIT.LEFT;
@@ -170,16 +193,22 @@ export const Ps2LabPanel: React.FC<Props> = ({
       <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center', justifyContent: 'space-between' }}>
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
           <button
-            className={`btn btn-sm ${engineMode === 'vgfa-native' ? 'btn-primary' : 'btn-ghost'}`}
-            onClick={() => setEngineMode('vgfa-native')}
+            className={`btn btn-sm ${engineMode === 'pcsx2-webgpu' ? 'btn-primary' : 'btn-cyan'}`}
+            onClick={() => {
+              setEngineMode('pcsx2-webgpu');
+              setRunnerKey((k) => k + 1);
+            }}
           >
-            🚀 VGFA-PS2 Integrado (Sem BIOS + Streaming)
+            ⚡ VGFA-PS2 Turbo 60 FPS (WebGPU + Hyper-Stream)
           </button>
           <button
-            className={`btn btn-sm ${engineMode === 'pcsx2-webgpu' ? 'btn-primary' : 'btn-ghost'}`}
-            onClick={() => setEngineMode('pcsx2-webgpu')}
+            className={`btn btn-sm ${engineMode === 'vgfa-native' ? 'btn-primary' : 'btn-ghost'}`}
+            onClick={() => {
+              setEngineMode('vgfa-native');
+              setRunnerKey((k) => k + 1);
+            }}
           >
-            ⚡ Modo Turbo 60 FPS (Chrome WebGPU)
+            🚀 Instantâneo Sem BIOS (Play.wasm)
           </button>
           <button
             className={`btn btn-sm ${engineMode === 'disc' ? 'btn-primary' : 'btn-ghost'}`}
@@ -189,7 +218,7 @@ export const Ps2LabPanel: React.FC<Props> = ({
           </button>
         </div>
 
-        <label className="btn btn-sm btn-cyan" style={{ cursor: 'pointer' }}>
+        <label className="btn btn-sm btn-ghost" style={{ cursor: 'pointer' }}>
           📂 Trocar ISO Local
           <input
             type="file"
@@ -201,12 +230,60 @@ export const Ps2LabPanel: React.FC<Props> = ({
                 setActiveUrl(null);
                 setActiveFile(f);
                 setRunnerKey((k) => k + 1);
-                setEngineMode('vgfa-native');
               }
             }}
           />
         </label>
       </div>
+
+      {/* Aviso útil quando rodando no modo Sem BIOS ou no Safari */}
+      {engineMode === 'vgfa-native' && (
+        <div
+          style={{
+            padding: '8px 14px',
+            borderRadius: 10,
+            background: 'rgba(56, 189, 248, 0.1)',
+            border: '1px solid rgba(56, 189, 248, 0.3)',
+            color: '#bae6fd',
+            fontSize: 12,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            flexWrap: 'wrap',
+            gap: 8,
+          }}
+        >
+          <span>
+            💡 <strong>Quer jogar em 50–60 FPS fluídos sem travar?</strong> O modo Sem BIOS é ótimo para teste rápido, mas o{' '}
+            <strong>VGFA-PS2 Turbo WebGPU</strong> usa GPU real no <strong>Chrome / Edge</strong> + Hyper-Stream NVMe!
+          </span>
+          <button
+            className="btn btn-sm btn-primary"
+            onClick={() => {
+              setEngineMode('pcsx2-webgpu');
+              setRunnerKey((k) => k + 1);
+            }}
+          >
+            ⚡ Ativar Turbo 60 FPS
+          </button>
+        </div>
+      )}
+
+      {caps && !caps.dualSourceBlending && engineMode === 'pcsx2-webgpu' && (
+        <div
+          style={{
+            padding: '8px 14px',
+            borderRadius: 10,
+            background: 'rgba(255, 181, 71, 0.12)',
+            border: '1px solid rgba(255, 181, 71, 0.38)',
+            color: '#fde68a',
+            fontSize: 12,
+          }}
+        >
+          ⚠️ Você está em um navegador sem <strong>WebGPU Dual-Source Blending / JSPI</strong> (como Safari). Abra este mesmo endereço no{' '}
+          <strong>Google Chrome ou Microsoft Edge</strong> para destravar aceleração de GPU em <strong>50–60 FPS</strong>!
+        </div>
+      )}
 
       {error && (
         <div
@@ -243,46 +320,42 @@ export const Ps2LabPanel: React.FC<Props> = ({
             {isoMeta.region && isoMeta.region !== 'UNKNOWN' ? ` (${isoMeta.region})` : ''}
           </span>
           <span className="mono">
-            {fmtSize(metrics.discSizeBytes)} • Streaming sob demanda ativo
+            {fmtSize(metrics.discSizeBytes)} • VGFA Hyper-Stream NVMe 2 MiB + Prefetch 4x
           </span>
         </div>
       )}
 
-      {/* MOTOR 1: VGFA-PS2 NATIVO (Mesma Origem — Sem bloqueio COEP — Sem BIOS — Streaming Automático!) */}
-      {engineMode === 'vgfa-native' && (
-        <div style={{ borderRadius: 12, overflow: 'hidden', border: '1px solid var(--border)', background: '#000' }}>
+      {/* MOTOR 1: VGFA-PS2 TURBO WEBGPU (PCSX2 WASM JIT + WebGPU HW 60 FPS + VGFA Hyper-Stream + Celular Analógico!) */}
+      {engineMode === 'pcsx2-webgpu' && (
+        <div style={{ borderRadius: 12, overflow: 'hidden', border: '1px solid var(--amber)', background: '#000' }}>
           <iframe
-            key={runnerKey}
-            ref={iframeRef}
-            title="VGFA PlayStation 2 Engine"
-            src="/ps2-runner.html"
-            style={{ width: '100%', height: 540, border: 'none', display: 'block', background: '#000' }}
+            key={`turbo-${runnerKey}`}
+            ref={(el) => {
+              iframeRef.current = el;
+              onIframeChange?.(el);
+            }}
+            title="VGFA PS2 Turbo WebGPU 60 FPS"
+            src="/ps2-turbo-runner.html"
+            style={{ width: '100%', height: 560, border: 'none', display: 'block', background: '#000' }}
             allow="gamepad *; fullscreen *; autoplay *"
           />
         </div>
       )}
 
-      {/* MOTOR 2: PCSX2 WebGPU (Recomendado no Chrome/Edge para jogos AAA pesados em 60 FPS) */}
-      {engineMode === 'pcsx2-webgpu' && (
-        <div className="panel" style={{ background: 'var(--bg-0)' }}>
-          <strong style={{ display: 'block', fontSize: 16, marginBottom: 8, color: 'var(--amber)' }}>
-            Motor PS2 Turbo 60 FPS (PCSX2 WebGPU — Recomendado no Google Chrome)
-          </strong>
-          <p style={{ margin: '0 0 12px', fontSize: 13, color: 'var(--text-1)', lineHeight: 1.55 }}>
-            O motor embutido sem BIOS acima roda direto no Safari e no Chrome, mas para jogos 3D muito pesados como{' '}
-            <strong>God of War II</strong>, <strong>GTA: San Andreas</strong> e{' '}
-            <strong>Dragon Ball Z: Budokai Tenkaichi 3</strong> em <strong>60 FPS reais</strong>, o{' '}
-            <strong>Google Chrome / Edge com WebGPU</strong> + PCSX2 WASM entrega a maior compatibilidade (exige sua BIOS PS2 <code>.bin</code> + ISO local):
-          </p>
-          <a
-            className="btn btn-primary"
-            style={{ padding: '12px 18px', fontSize: 14 }}
-            href="https://tabstationtoo.github.io/TabStationToo/"
-            target="_blank"
-            rel="noreferrer"
-          >
-            ▶ Abrir PCSX2 WebGPU 60 FPS (Chrome / Edge) ↗
-          </a>
+      {/* MOTOR 2: VGFA-PS2 INSTANTÂNEO (Sem BIOS — Play.wasm + Hyper-Stream NVMe) */}
+      {engineMode === 'vgfa-native' && (
+        <div style={{ borderRadius: 12, overflow: 'hidden', border: '1px solid var(--border)', background: '#000' }}>
+          <iframe
+            key={`play-${runnerKey}`}
+            ref={(el) => {
+              iframeRef.current = el;
+              onIframeChange?.(el);
+            }}
+            title="VGFA PlayStation 2 Instant Engine"
+            src="/ps2-runner.html"
+            style={{ width: '100%', height: 560, border: 'none', display: 'block', background: '#000' }}
+            allow="gamepad *; fullscreen *; autoplay *"
+          />
         </div>
       )}
 

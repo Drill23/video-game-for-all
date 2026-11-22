@@ -1,13 +1,35 @@
+import { spawn, type ChildProcess } from 'node:child_process';
+import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { Readable } from 'node:stream';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { WebSocketServer, WebSocket } from 'ws';
 
-const DEFAULT_PORT = Number(process.env.VGFA_SIGNALING_PORT || 8787);
+const DEFAULT_PORT = Number(process.env.PORT || process.env.VGFA_SIGNALING_PORT || 8787);
 const WEB_PORT = Number(process.env.VGFA_WEB_PORT || 5173);
+const SERVE_STATIC = process.env.VGFA_SERVE_STATIC === '1';
+
+const SERVER_DIR = path.dirname(fileURLToPath(import.meta.url));
+const WEB_DIST_DIR = path.resolve(SERVER_DIR, '../../web/dist');
+
+const STATIC_MIME: Record<string, string> = {
+  '.html': 'text/html; charset=utf-8',
+  '.js': 'application/javascript; charset=utf-8',
+  '.mjs': 'application/javascript; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
+  '.svg': 'image/svg+xml',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.webp': 'image/webp',
+  '.ico': 'image/x-icon',
+  '.wasm': 'application/wasm',
+  '.data': 'application/octet-stream',
+};
 
 interface PadPeer {
   peerId: string;
@@ -22,6 +44,21 @@ interface Room {
   consoleId: string;
   gameTitle: string;
   pads: Map<string, PadPeer>;
+  createdAt: number;
+}
+
+interface CastViewer {
+  viewerId: string;
+  label: string;
+  ws: WebSocket;
+}
+
+interface CastRoom {
+  code: string;
+  hostWs: WebSocket;
+  consoleId: string;
+  gameTitle: string;
+  viewers: Map<string, CastViewer>;
   createdAt: number;
 }
 
@@ -146,6 +183,212 @@ async function handlePs2CoreAsset(res: http.ServerResponse, filename: string): P
   }
 }
 
+const PS2_TURBO_CACHE_DIR = path.join(os.tmpdir(), 'vgfa-ps2-turbo-cache');
+const ALLOWED_PS2_TURBO_FILES: Record<string, string> = {
+  'pcsx2-wasm.js': 'application/javascript; charset=utf-8',
+  'pcsx2-wasm.wasm': 'application/wasm',
+  'pcsx2-wasm.data': 'application/octet-stream',
+  'disc-worker.js': 'application/javascript; charset=utf-8',
+  'audio-tap.js': 'application/javascript; charset=utf-8',
+};
+
+/**
+ * Serve os artefatos PCSX2 WebAssembly + WebGPU HW (TabStationToo) em mesma origem
+ * com cache persistente em disco e headers COOP/COEP/CORP obrigatórios para
+ * SharedArrayBuffer + pthreads + WebGPU 60 FPS, alimentados pelo VGFA Hyper-Stream!
+ */
+async function handlePs2TurboAsset(res: http.ServerResponse, filename: string): Promise<void> {
+  const mime = ALLOWED_PS2_TURBO_FILES[filename];
+  if (!mime) {
+    res.writeHead(404, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Arquivo do motor PS2 Turbo não encontrado.' }));
+    return;
+  }
+
+  const localPath = path.join(PS2_TURBO_CACHE_DIR, filename);
+  const headers: Record<string, string> = {
+    'Content-Type': mime,
+    'Cross-Origin-Opener-Policy': 'same-origin',
+    'Cross-Origin-Embedder-Policy': 'require-corp',
+    'Cross-Origin-Resource-Policy': 'cross-origin',
+    'Access-Control-Allow-Origin': '*',
+    'Cache-Control': 'public, max-age=86400',
+  };
+
+  try {
+    const cached = await fs.readFile(localPath);
+    headers['Content-Length'] = String(cached.byteLength);
+    res.writeHead(200, headers);
+    res.end(cached);
+    return;
+  } catch {
+    // Ainda não está em cache local; busca uma única vez e grava em disco
+  }
+
+  try {
+    const upstream = await fetch(`https://tabstationtoo.github.io/TabStationToo/${filename}`, {
+      headers: { 'User-Agent': 'VGFA-PS2Turbo/0.5' },
+      signal: AbortSignal.timeout(45_000),
+    });
+    if (!upstream.ok) {
+      res.writeHead(upstream.status, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: `Falha ao obter ${filename} (HTTP ${upstream.status})` }));
+      return;
+    }
+    const buf = Buffer.from(await upstream.arrayBuffer());
+    await fs.mkdir(PS2_TURBO_CACHE_DIR, { recursive: true });
+    await fs.writeFile(localPath, buf).catch(() => {});
+
+    headers['Content-Length'] = String(buf.byteLength);
+    res.writeHead(200, headers);
+    res.end(buf);
+  } catch (err) {
+    res.writeHead(502, { 'Content-Type': 'application/json' });
+    res.end(
+      JSON.stringify({
+        error: `Erro ao baixar motor PS2 Turbo ${filename}: ${err instanceof Error ? err.message : String(err)}`,
+      }),
+    );
+  }
+}
+
+async function tryServeStaticFile(res: http.ServerResponse, pathname: string): Promise<boolean> {
+  if (!SERVE_STATIC) return false;
+  let cleanPath = decodeURIComponent(pathname.split('?')[0] || '/');
+  if (cleanPath === '/' || cleanPath === '') cleanPath = '/index.html';
+
+  const resolved = path.resolve(WEB_DIST_DIR, '.' + cleanPath);
+  if (!resolved.startsWith(WEB_DIST_DIR)) return false;
+
+  const sendFile = async (filePath: string): Promise<boolean> => {
+    try {
+      const stat = await fs.stat(filePath);
+      if (!stat.isFile()) return false;
+      const ext = path.extname(filePath).toLowerCase();
+      const mime = STATIC_MIME[ext] || 'application/octet-stream';
+      const content = await fs.readFile(filePath);
+      res.writeHead(200, {
+        'Content-Type': mime,
+        'Content-Length': String(content.byteLength),
+        'Cross-Origin-Opener-Policy': 'same-origin',
+        'Cross-Origin-Embedder-Policy': 'require-corp',
+        'Cross-Origin-Resource-Policy': 'cross-origin',
+        'Cache-Control': ext === '.html' ? 'no-cache' : 'public, max-age=3600',
+      });
+      res.end(content);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  if (await sendFile(resolved)) return true;
+  if (!cleanPath.startsWith('/api/') && !cleanPath.startsWith('/ws')) {
+    return sendFile(path.join(WEB_DIST_DIR, 'index.html'));
+  }
+  return false;
+}
+
+// ==================== VGFA HYPER-STREAM: Cache de Blocos 2 MiB em NVMe + Prefetch Paralelo 4x ====================
+const HYPER_BLOCK_SIZE = 2 * 1024 * 1024; // 2 MiB por bloco alinhado
+const HYPER_PREFETCH_BLOCKS = 3; // 6 MiB pré-carregados à frente em paralelo!
+const HYPER_CACHE_ROOT = path.join(os.tmpdir(), 'vgfa-hyper-stream-cache');
+const hyperSizeCache = new Map<string, { size: number; resolvedUrl: string; contentType: string }>();
+const hyperInFlight = new Map<string, Promise<Buffer>>();
+
+function hashKey(s: string): string {
+  return crypto.createHash('sha1').update(s).digest('hex').slice(0, 16);
+}
+
+async function resolveHyperMeta(targetUrl: string): Promise<{ size: number; resolvedUrl: string; contentType: string } | null> {
+  const cached = hyperSizeCache.get(targetUrl);
+  if (cached) return cached;
+
+  const res = await fetch(targetUrl, {
+    method: 'GET',
+    headers: {
+      'User-Agent': 'VGFA-HyperStream/0.5',
+      Range: 'bytes=0-0',
+    },
+    redirect: 'follow',
+    signal: AbortSignal.timeout(12_000),
+  });
+
+  if (res.status !== 206) {
+    await res.body?.cancel().catch(() => {});
+    return null;
+  }
+
+  const cr = res.headers.get('content-range') || '';
+  const m = /^bytes\s+0-0\/(\d+)$/.exec(cr.trim());
+  await res.arrayBuffer().catch(() => null);
+  if (!m) return null;
+
+  const info = {
+    size: Number(m[1]),
+    resolvedUrl: res.url || targetUrl,
+    contentType: res.headers.get('content-type') || 'application/octet-stream',
+  };
+  hyperSizeCache.set(targetUrl, info);
+  return info;
+}
+
+async function fetchHyperBlock(
+  targetUrl: string,
+  meta: { size: number; resolvedUrl: string },
+  blockIdx: number,
+): Promise<Buffer> {
+  const start = blockIdx * HYPER_BLOCK_SIZE;
+  if (start >= meta.size) return Buffer.alloc(0);
+  const end = Math.min(meta.size - 1, start + HYPER_BLOCK_SIZE - 1);
+
+  const urlHash = hashKey(targetUrl);
+  const key = `${urlHash}:${blockIdx}`;
+  const blockDir = path.join(HYPER_CACHE_ROOT, urlHash);
+  const blockPath = path.join(blockDir, `${blockIdx}.blk`);
+
+  // 1. Leitura NVMe (< 1 ms!)
+  try {
+    return await fs.readFile(blockPath);
+  } catch {
+    // Cache miss em disco
+  }
+
+  // 2. Deduplicação in-flight
+  const existing = hyperInFlight.get(key);
+  if (existing) return existing;
+
+  const job = (async () => {
+    const upstream = await fetch(meta.resolvedUrl, {
+      method: 'GET',
+      headers: {
+        'User-Agent': 'VGFA-HyperStream/0.5',
+        Range: `bytes=${start}-${end}`,
+      },
+      redirect: 'follow',
+      signal: AbortSignal.timeout(25_000),
+    });
+
+    if (upstream.status !== 206 && upstream.status !== 200) {
+      await upstream.body?.cancel().catch(() => {});
+      throw new Error(`HTTP ${upstream.status}`);
+    }
+
+    const buf = Buffer.from(await upstream.arrayBuffer());
+    // Persiste no cache NVMe sem bloquear o retorno
+    void fs
+      .mkdir(blockDir, { recursive: true })
+      .then(() => fs.writeFile(blockPath, buf))
+      .catch(() => {});
+    return buf;
+  })().finally(() => {
+    hyperInFlight.delete(key);
+  });
+
+  hyperInFlight.set(key, job);
+  return job;
+}
+
 async function handleStreamProxy(req: http.IncomingMessage, res: http.ServerResponse, urlObj: URL): Promise<void> {
   const targetRaw = urlObj.searchParams.get('url');
   if (!targetRaw) {
@@ -161,12 +404,100 @@ async function handleStreamProxy(req: http.IncomingMessage, res: http.ServerResp
     return;
   }
 
+  // Caminho Hyper-Stream (blocos 2 MiB NVMe + prefetch paralelo 4x) para leituras Range de ISOs grandes!
+  const rangeHeader = typeof req.headers.range === 'string' ? req.headers.range : '';
+  const rangeMatch = /^bytes=(\d+)-(\d+)$/.exec(rangeHeader.trim());
+  if (req.method === 'GET' && rangeMatch) {
+    const reqStart = Number(rangeMatch[1]);
+    const reqEnd = Number(rangeMatch[2]);
+    const reqLen = reqEnd - reqStart + 1;
+
+    // Só ativa Hyper-Stream para pedidos de range <= 8 MiB (e responde bytes=0-0 instantâneo se já em cache)
+    if (reqLen === 1 && reqStart === 0 && hyperSizeCache.has(target.toString())) {
+      const meta = hyperSizeCache.get(target.toString())!;
+      if (meta.size > 4 * 1024 * 1024) {
+        try {
+          const blk0 = await fetchHyperBlock(target.toString(), meta, 0);
+          const oneByte = blk0.subarray(0, 1);
+          res.writeHead(206, {
+            'Content-Type': meta.contentType,
+            'Content-Length': '1',
+            'Content-Range': `bytes 0-0/${meta.size}`,
+            'Accept-Ranges': 'bytes',
+            'Access-Control-Allow-Origin': '*',
+            'Access-Control-Expose-Headers': 'Content-Range, Content-Length, Accept-Ranges, Content-Type, X-VGFA-HyperStream',
+            'Cross-Origin-Resource-Policy': 'cross-origin',
+            'X-VGFA-HyperStream': 'nvme-2mb-4x',
+          });
+          res.end(oneByte);
+          return;
+        } catch {
+          // Segue para proxy direto
+        }
+      }
+    }
+
+    if (reqLen > 1 && reqLen <= 8 * 1024 * 1024) {
+      try {
+        const meta = await resolveHyperMeta(target.toString());
+        if (meta && meta.size > 4 * 1024 * 1024 && reqStart < meta.size) {
+          const clampedEnd = Math.min(meta.size - 1, reqEnd);
+          const firstBlock = Math.floor(reqStart / HYPER_BLOCK_SIZE);
+          const lastBlock = Math.floor(clampedEnd / HYPER_BLOCK_SIZE);
+
+          const blockPromises: Array<Promise<Buffer>> = [];
+          for (let b = firstBlock; b <= lastBlock; b++) {
+            blockPromises.push(fetchHyperBlock(target.toString(), meta, b));
+          }
+          const blocks = await Promise.all(blockPromises);
+
+          // Dispara prefetch paralelo de 3 blocos à frente (6 MiB) em background!
+          for (let k = 1; k <= HYPER_PREFETCH_BLOCKS; k++) {
+            const nextBlock = lastBlock + k;
+            if (nextBlock * HYPER_BLOCK_SIZE < meta.size) {
+              void fetchHyperBlock(target.toString(), meta, nextBlock).catch(() => {});
+            }
+          }
+
+          const out = Buffer.allocUnsafe(clampedEnd - reqStart + 1);
+          let cursor = 0;
+          for (let i = 0; i < blocks.length; i++) {
+            const bIdx = firstBlock + i;
+            const bStart = bIdx * HYPER_BLOCK_SIZE;
+            const sliceStart = Math.max(0, reqStart - bStart);
+            const sliceEnd = Math.min(blocks[i].length, clampedEnd + 1 - bStart);
+            if (sliceEnd > sliceStart) {
+              blocks[i].copy(out, cursor, sliceStart, sliceEnd);
+              cursor += sliceEnd - sliceStart;
+            }
+          }
+
+          const sliceOut = cursor === out.length ? out : out.subarray(0, cursor);
+          res.writeHead(206, {
+            'Content-Type': meta.contentType,
+            'Content-Length': String(sliceOut.length),
+            'Content-Range': `bytes ${reqStart}-${reqStart + sliceOut.length - 1}/${meta.size}`,
+            'Accept-Ranges': 'bytes',
+            'Access-Control-Allow-Origin': '*',
+            'Access-Control-Expose-Headers': 'Content-Range, Content-Length, Accept-Ranges, Content-Type, X-VGFA-HyperStream',
+            'Cross-Origin-Resource-Policy': 'cross-origin',
+            'X-VGFA-HyperStream': 'nvme-2mb-4x',
+          });
+          res.end(sliceOut);
+          return;
+        }
+      } catch {
+        // Cai suavemente para o proxy streaming direto abaixo
+      }
+    }
+  }
+
   const headers: Record<string, string> = {
-    'User-Agent': 'VGFA-StreamProxy/0.2 (+https://github.com/Drill23/video-game-for-all)',
+    'User-Agent': 'VGFA-StreamProxy/0.5 (+https://github.com/Drill23/video-game-for-all)',
     Accept: '*/*',
   };
-  if (typeof req.headers.range === 'string') {
-    headers.Range = req.headers.range;
+  if (rangeHeader) {
+    headers.Range = rangeHeader;
   }
 
   const controller = new AbortController();
@@ -229,6 +560,85 @@ async function handleStreamProxy(req: http.IncomingMessage, res: http.ServerResp
       }),
     );
   }
+}
+
+// ==================== Túnel Público Mundial (Cloudflare Quick Tunnel) ====================
+let tunnelProc: ChildProcess | null = null;
+let tunnelPublicUrl: string | null = null;
+let tunnelStatus: 'stopped' | 'starting' | 'running' | 'error' = 'stopped';
+let tunnelError: string | null = null;
+
+function startPublicTunnel(targetPort: number): Promise<{ url: string | null; status: string; error?: string }> {
+  if (tunnelProc && tunnelPublicUrl) {
+    return Promise.resolve({ url: tunnelPublicUrl, status: 'running' });
+  }
+  stopPublicTunnel();
+  tunnelStatus = 'starting';
+  tunnelError = null;
+  tunnelPublicUrl = null;
+
+  return new Promise((resolve) => {
+    const bin = process.platform === 'darwin' ? '/opt/homebrew/bin/cloudflared' : 'cloudflared';
+    let settled = false;
+    const finish = (payload: { url: string | null; status: string; error?: string }) => {
+      if (settled) return;
+      settled = true;
+      resolve(payload);
+    };
+
+    try {
+      const proc = spawn(bin, ['tunnel', '--no-autoupdate', '--url', `http://127.0.0.1:${targetPort}`], {
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      tunnelProc = proc;
+
+      const onData = (chunk: Buffer) => {
+        const text = chunk.toString('utf8');
+        const m = /https:\/\/[a-z0-9-]+\.trycloudflare\.com/i.exec(text);
+        if (m) {
+          tunnelPublicUrl = m[0];
+          tunnelStatus = 'running';
+          finish({ url: tunnelPublicUrl, status: 'running' });
+        }
+      };
+
+      proc.stdout?.on('data', onData);
+      proc.stderr?.on('data', onData);
+      proc.on('error', (err) => {
+        tunnelStatus = 'error';
+        tunnelError = `cloudflared não encontrado ou falhou: ${err.message}`;
+        tunnelProc = null;
+        finish({ url: null, status: 'error', error: tunnelError });
+      });
+      proc.on('exit', () => {
+        if (tunnelStatus !== 'error') {
+          tunnelStatus = 'stopped';
+          tunnelPublicUrl = null;
+        }
+        tunnelProc = null;
+      });
+
+      setTimeout(() => {
+        if (!settled) {
+          finish({ url: tunnelPublicUrl, status: tunnelStatus, error: 'Aguardando URL do túnel...' });
+        }
+      }, 10_000);
+    } catch (err) {
+      tunnelStatus = 'error';
+      tunnelError = err instanceof Error ? err.message : String(err);
+      finish({ url: null, status: 'error', error: tunnelError });
+    }
+  });
+}
+
+function stopPublicTunnel(): void {
+  if (tunnelProc) {
+    tunnelProc.kill('SIGTERM');
+    tunnelProc = null;
+  }
+  tunnelPublicUrl = null;
+  tunnelStatus = 'stopped';
+  tunnelError = null;
 }
 
 async function handleArchiveSearch(res: http.ServerResponse, urlObj: URL): Promise<void> {
@@ -534,18 +944,19 @@ async function handleArchiveSmartFind(res: http.ServerResponse, urlObj: URL): Pr
 
 export function createSignalingServer(port = DEFAULT_PORT) {
   const rooms = new Map<string, Room>();
+  const castRooms = new Map<string, CastRoom>();
   const ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 
-  function generateRoomCode(): string {
+  function generateRoomCode(prefix = 'VGFA'): string {
     for (let tries = 0; tries < 50; tries++) {
       let code = '';
       for (let i = 0; i < 4; i++) {
         code += ALPHABET[Math.floor(Math.random() * ALPHABET.length)];
       }
-      const full = `VGFA-${code}`;
-      if (!rooms.has(full)) return full;
+      const full = `${prefix}-${code}`;
+      if (!rooms.has(full) && !castRooms.has(full)) return full;
     }
-    return `VGFA-${Date.now().toString(36).slice(-4).toUpperCase()}`;
+    return `${prefix}-${Date.now().toString(36).slice(-4).toUpperCase()}`;
   }
 
   function getLanAddresses(): string[] {
@@ -619,6 +1030,12 @@ export function createSignalingServer(port = DEFAULT_PORT) {
       return;
     }
 
+    if (urlObj.pathname.startsWith('/api/ps2-turbo/')) {
+      const file = urlObj.pathname.slice('/api/ps2-turbo/'.length);
+      void handlePs2TurboAsset(res, file);
+      return;
+    }
+
     if (urlObj.pathname === '/api/proxy/stream') {
       void handleStreamProxy(req, res, urlObj);
       return;
@@ -634,19 +1051,53 @@ export function createSignalingServer(port = DEFAULT_PORT) {
       return;
     }
 
+    if (urlObj.pathname === '/api/tunnel/status') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(
+        JSON.stringify({
+          status: tunnelStatus,
+          url: tunnelPublicUrl,
+          error: tunnelError,
+        }),
+      );
+      return;
+    }
+
+    if (urlObj.pathname === '/api/tunnel/start' && req.method === 'POST') {
+      const addr = server.address();
+      const activePort = typeof addr === 'object' && addr ? addr.port : port;
+      const targetTunnelPort = SERVE_STATIC ? activePort : WEB_PORT;
+      void startPublicTunnel(targetTunnelPort).then((result) => {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(result));
+      });
+      return;
+    }
+
+    if (urlObj.pathname === '/api/tunnel/stop' && req.method === 'POST') {
+      stopPublicTunnel();
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ status: 'stopped', url: null }));
+      return;
+    }
+
     if (urlObj.pathname === '/api/archive/smart-find') {
       void handleArchiveSmartFind(res, urlObj);
       return;
     }
 
-    res.writeHead(404, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: 'Not found' }));
+    void tryServeStaticFile(res, urlObj.pathname).then((served) => {
+      if (!served && !res.headersSent) {
+        res.writeHead(404, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Not found' }));
+      }
+    });
   });
 
   const wss = new WebSocketServer({ server });
 
   wss.on('connection', (ws) => {
-    let role: 'host' | 'pad' | null = null;
+    let role: 'host' | 'pad' | 'cast-host' | 'cast-viewer' | null = null;
     let roomCode: string | null = null;
     let peerId: string | null = null;
 
@@ -656,6 +1107,11 @@ export function createSignalingServer(port = DEFAULT_PORT) {
           const room = rooms.get(roomCode);
           if (room && room.hostWs.readyState === WebSocket.OPEN) {
             room.hostWs.send(data, { binary: true });
+          }
+        } else if (role === 'cast-viewer' && roomCode) {
+          const cast = castRooms.get(roomCode);
+          if (cast && cast.hostWs.readyState === WebSocket.OPEN) {
+            cast.hostWs.send(data, { binary: true });
           }
         }
         return;
@@ -789,11 +1245,93 @@ export function createSignalingServer(port = DEFAULT_PORT) {
         } else if (role === 'pad' && peerId) {
           sendJson(room.hostWs, { type: 'rtc:ice', peerId, candidate: msg.candidate });
         }
+        return;
+      }
+
+      // ==================== VGFA-CAST (WebRTC 60 FPS P2P Personal Cloud Gaming) ====================
+      if (type === 'cast:create') {
+        role = 'cast-host';
+        roomCode = generateRoomCode('CAST');
+        castRooms.set(roomCode, {
+          code: roomCode,
+          hostWs: ws,
+          consoleId: String(msg.consoleId || 'ps2'),
+          gameTitle: String(msg.gameTitle || 'VGFA'),
+          viewers: new Map(),
+          createdAt: Date.now(),
+        });
+        sendJson(ws, { type: 'cast:created', castCode: roomCode });
+        return;
+      }
+
+      if (type === 'cast:join') {
+        const requested = String(msg.castCode || '').trim().toUpperCase();
+        const normalized = requested.startsWith('CAST-') ? requested : `CAST-${requested}`;
+        const cast = castRooms.get(requested) ?? castRooms.get(normalized);
+        if (!cast) {
+          sendJson(ws, { type: 'cast:error', message: `Transmissão ${requested} não encontrada ou encerrada.` });
+          return;
+        }
+        role = 'cast-viewer';
+        roomCode = cast.code;
+        peerId = `viewer_${Math.random().toString(36).slice(2, 10)}`;
+        const label = String(msg.label || 'Jogador Remoto');
+        cast.viewers.set(peerId, { viewerId: peerId, label, ws });
+        sendJson(ws, {
+          type: 'cast:joined',
+          castCode: cast.code,
+          viewerId: peerId,
+          consoleId: cast.consoleId,
+          gameTitle: cast.gameTitle,
+        });
+        sendJson(cast.hostWs, { type: 'cast:viewer-joined', viewerId: peerId, label });
+        return;
+      }
+
+      if (type === 'cast:offer' && role === 'cast-host' && roomCode) {
+        const cast = castRooms.get(roomCode);
+        const viewer = cast?.viewers.get(String(msg.viewerId || ''));
+        if (viewer) sendJson(viewer.ws, { type: 'cast:offer', sdp: msg.sdp });
+        return;
+      }
+
+      if (type === 'cast:answer' && role === 'cast-viewer' && roomCode && peerId) {
+        const cast = castRooms.get(roomCode);
+        if (cast) sendJson(cast.hostWs, { type: 'cast:answer', viewerId: peerId, sdp: msg.sdp });
+        return;
+      }
+
+      if (type === 'cast:ice' && roomCode) {
+        const cast = castRooms.get(roomCode);
+        if (!cast) return;
+        if (role === 'cast-host') {
+          const viewer = cast.viewers.get(String(msg.viewerId || ''));
+          if (viewer) sendJson(viewer.ws, { type: 'cast:ice', candidate: msg.candidate });
+        } else if (role === 'cast-viewer' && peerId) {
+          sendJson(cast.hostWs, { type: 'cast:ice', viewerId: peerId, candidate: msg.candidate });
+        }
       }
     });
 
     ws.on('close', () => {
       if (!roomCode) return;
+
+      if (role === 'cast-host' || role === 'cast-viewer') {
+        const cast = castRooms.get(roomCode);
+        if (!cast) return;
+        if (role === 'cast-host') {
+          for (const v of cast.viewers.values()) {
+            sendJson(v.ws, { type: 'cast:error', message: 'O host encerrou a transmissão.' });
+            v.ws.close();
+          }
+          castRooms.delete(roomCode);
+        } else if (peerId) {
+          cast.viewers.delete(peerId);
+          sendJson(cast.hostWs, { type: 'cast:viewer-left', viewerId: peerId });
+        }
+        return;
+      }
+
       const room = rooms.get(roomCode);
       if (!room) return;
 
@@ -819,14 +1357,19 @@ export function createSignalingServer(port = DEFAULT_PORT) {
           const addr = server.address();
           const boundPort = typeof addr === 'object' && addr ? addr.port : port;
           const lans = getLanAddresses();
-          console.log(`[VGFA Signaling] Rodando em ws://0.0.0.0:${boundPort}`);
-          console.log(`[VGFA Signaling] Proxy CORS-Free ativo em /api/proxy/stream`);
+          console.log(`[VGFA Signaling] Rodando em http://0.0.0.0:${boundPort} (WS em /ws)`);
+          console.log(`[VGFA Signaling] Hyper-Stream NVMe 2MiB+4x ativo em /api/proxy/stream`);
+          console.log(`[VGFA Signaling] PS2 Turbo WebGPU (PCSX2 WASM) em /api/ps2-turbo/*`);
+          if (SERVE_STATIC) {
+            console.log(`[VGFA Signaling] Modo Produção (Porta Única) servindo ${WEB_DIST_DIR}`);
+          }
           console.log(`[VGFA Signaling] IP LAN detectado para QR Code do celular: ${lans[0] ?? '127.0.0.1'}`);
           resolve(boundPort);
         });
       });
     },
     close(): Promise<void> {
+      stopPublicTunnel();
       return new Promise((resolve) => {
         wss.close(() => {
           server.close(() => resolve());
@@ -837,5 +1380,12 @@ export function createSignalingServer(port = DEFAULT_PORT) {
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  void createSignalingServer(DEFAULT_PORT).start();
+  const srv = createSignalingServer(DEFAULT_PORT);
+  const shutdown = () => {
+    stopPublicTunnel();
+    void srv.close().finally(() => process.exit(0));
+  };
+  process.on('SIGINT', shutdown);
+  process.on('SIGTERM', shutdown);
+  void srv.start();
 }

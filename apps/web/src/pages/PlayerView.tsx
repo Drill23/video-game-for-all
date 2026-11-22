@@ -24,6 +24,7 @@ import type { Dictionary } from '../i18n/translations.js';
 import { Ps2LabPanel } from '../components/Ps2LabPanel.js';
 import { QrConnectModal } from '../components/QrConnectModal.js';
 import { MobileInlinePad } from '../components/MobileInlinePad.js';
+import { VgfaCastHost } from '../services/vgfa-cast.js';
 
 function detectMobileDevice(): boolean {
   if (typeof window === 'undefined') return false;
@@ -37,9 +38,8 @@ function detectMobileDevice(): boolean {
 
 function getSignalingUrl(): string {
   const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const host = window.location.hostname || '127.0.0.1';
-  const port = import.meta.env.VITE_SIGNALING_PORT || '8787';
-  return `${proto}//${host}:${port}`;
+  // Usa /ws na mesma origem/porta — funciona em localhost, LAN e qualquer link HTTPS público (4G/5G)!
+  return `${proto}//${window.location.host}/ws`;
 }
 
 export type PlayerMode = 'emulatorjs-rom' | 'ps2-webgpu-lab' | 'builtin-arcade';
@@ -71,6 +71,8 @@ export const PlayerView: React.FC<Props> = ({ t, session, userId, saveStore, onB
 
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
+  const ps2IframeRef = useRef<HTMLIFrameElement | null>(null);
+  const castHostRef = useRef<VgfaCastHost | null>(null);
   const builtinRef = useRef<VgfaBuiltinArcadeEngine | null>(null);
   const hostRef = useRef<RemotePadHost | null>(null);
   const btAdapterRef = useRef(new BluetoothGamepadAdapter());
@@ -88,6 +90,14 @@ export const PlayerView: React.FC<Props> = ({ t, session, userId, saveStore, onB
   const [btPads, setBtPads] = useState<ConnectedPadInfo[]>([]);
   const [showQrModal, setShowQrModal] = useState(false);
   const [showAdvanced, setShowAdvanced] = useState(false);
+
+  // VGFA-Cast (Cloud Gaming P2P 60 FPS para amigos via link)
+  const [showCastModal, setShowCastModal] = useState(false);
+  const [castCode, setCastCode] = useState<string | null>(null);
+  const [castUrl, setCastUrl] = useState<string>('');
+  const [castQr, setCastQr] = useState<string>('');
+  const [castViewers, setCastViewers] = useState(0);
+  const [castError, setCastError] = useState<string | null>(null);
 
   const [bootStatus, setBootStatus] = useState<string | null>(null);
   const [bootError, setBootError] = useState<string | null>(null);
@@ -121,12 +131,93 @@ export const PlayerView: React.FC<Props> = ({ t, session, userId, saveStore, onB
   const handleInlineMobilePad = useCallback(
     (state: PadState) => {
       inlinePadStateRef.current = state;
+      setLivePhonePad(state);
       if (session.mode === 'emulatorjs-rom') {
         keyBridgeRef.current.pushToIframe(state, iframeRef.current);
       }
     },
     [session.mode],
   );
+
+  // Inicia / encerra VGFA-Cast WebRTC 60 FPS para amigo
+  const resolveActiveGameCanvas = useCallback((): HTMLCanvasElement | null => {
+    if (session.mode === 'builtin-arcade') return canvasRef.current;
+    const frame = session.mode === 'ps2-webgpu-lab' ? ps2IframeRef.current : iframeRef.current;
+    const win = frame?.contentWindow as (Window & { __vgfaEnableCastMirror?: (on: boolean) => HTMLCanvasElement }) | null;
+    if (win && typeof win.__vgfaEnableCastMirror === 'function') {
+      return win.__vgfaEnableCastMirror(true);
+    }
+    try {
+      const doc = frame?.contentDocument;
+      return (doc?.querySelector('canvas') as HTMLCanvasElement | null) ?? null;
+    } catch {
+      return null;
+    }
+  }, [session.mode]);
+
+  const stopVgfaCast = useCallback(() => {
+    castHostRef.current?.dispose();
+    castHostRef.current = null;
+    const win = ps2IframeRef.current?.contentWindow as (Window & { __vgfaEnableCastMirror?: (on: boolean) => void }) | null;
+    win?.__vgfaEnableCastMirror?.(false);
+    setCastCode(null);
+    setCastUrl('');
+    setCastQr('');
+    setCastViewers(0);
+    setCastError(null);
+  }, []);
+
+  const startVgfaCast = useCallback(() => {
+    stopVgfaCast();
+    setCastError(null);
+    const castHost = new VgfaCastHost(session.consoleId, session.title, resolveActiveGameCanvas, {
+      onCreated: (code) => {
+        setCastCode(code);
+        void (async () => {
+          let base = window.location.origin;
+          try {
+            const tr = await globalThis.fetch('/api/tunnel/status');
+            if (tr.ok) {
+              const td = (await tr.json()) as { status?: string; url?: string | null };
+              if (td.status === 'running' && td.url) base = td.url;
+            }
+          } catch {}
+          if (base === window.location.origin && (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1')) {
+            try {
+              const nr = await globalThis.fetch('/api/network-info');
+              if (nr.ok) {
+                const ni = (await nr.json()) as { lanIp?: string };
+                if (ni.lanIp && ni.lanIp !== '127.0.0.1') {
+                  base = `${window.location.protocol}//${ni.lanIp}:${window.location.port || 5173}`;
+                }
+              }
+            } catch {}
+          }
+          const full = `${base}/watch/${code}`;
+          setCastUrl(full);
+          const png = await QRCode.toDataURL(full, {
+            width: 200,
+            margin: 2,
+            color: { dark: '#07080D', light: '#FFFFFF' },
+          });
+          setCastQr(png);
+        })();
+      },
+      onViewersChanged: (count) => setCastViewers(count),
+      onPadInput: (state) => {
+        inlinePadStateRef.current = state;
+        setLivePhonePad(state);
+        if (session.mode === 'emulatorjs-rom') {
+          keyBridgeRef.current.pushToIframe(state, iframeRef.current);
+        }
+      },
+      onError: (msg) => setCastError(msg),
+    });
+    castHostRef.current = castHost;
+    castHost.start();
+  }, [resolveActiveGameCanvas, session.consoleId, session.mode, session.title, stopVgfaCast]);
+
+  useEffect(() => () => stopVgfaCast(), [stopVgfaCast]);
 
   const readMergedInput = useCallback((): PadState => {
     const merged = createEmptyPadState(0);
@@ -714,6 +805,15 @@ export const PlayerView: React.FC<Props> = ({ t, session, userId, saveStore, onB
               <button className="btn btn-sm btn-primary" onClick={() => setShowQrModal(true)}>
                 📱 QR Controle {roomCode ? `(${roomCode})` : ''}
               </button>
+              <button
+                className={`btn btn-sm ${castCode ? 'btn-primary' : 'btn-cyan'}`}
+                onClick={() => {
+                  setShowCastModal(true);
+                  if (!castCode) startVgfaCast();
+                }}
+              >
+                📡 {castCode ? `Transmitindo (${castViewers})` : 'Transmitir 60 FPS'}
+              </button>
               {session.mode === 'builtin-arcade' && (
                 <button className="btn btn-sm btn-cyan" onClick={() => void handleSaveBuiltin()}>
                   💾 Salvar
@@ -739,6 +839,9 @@ export const PlayerView: React.FC<Props> = ({ t, session, userId, saveStore, onB
               initialUrl={session.remoteUrl}
               romFilename={session.romFilename}
               externalPadState={livePhonePad}
+              onIframeChange={(el) => {
+                ps2IframeRef.current = el;
+              }}
             />
           ) : (
             <div className="stage-canvas-wrap" style={{ minHeight: 460 }}>
@@ -842,6 +945,59 @@ export const PlayerView: React.FC<Props> = ({ t, session, userId, saveStore, onB
           bluetoothPads={btPads}
           onClose={() => setShowQrModal(false)}
         />
+      )}
+
+      {showCastModal && (
+        <div className="modal-backdrop" onClick={() => setShowCastModal(false)}>
+          <div className="modal-card" style={{ maxWidth: 480 }} onClick={(e) => e.stopPropagation()}>
+            <div className="modal-head">
+              <h3>📡 VGFA-Cast — Cloud Gaming P2P (60 FPS)</h3>
+              <button className="btn btn-sm btn-ghost" onClick={() => setShowCastModal(false)}>
+                ✕
+              </button>
+            </div>
+            <p style={{ margin: '0 0 12px', fontSize: 13, color: 'var(--text-1)', lineHeight: 1.5 }}>
+              Envie o link abaixo para qualquer amigo (mesmo em um celular simples ou Safari). O jogo roda na sua GPU aqui e transmite vídeo <strong>60 FPS via WebRTC</strong> com <strong>0 MB baixados</strong> para ele jogar pelo controle virtual!
+            </p>
+            {castError && (
+              <div style={{ padding: 10, borderRadius: 10, background: 'rgba(251, 113, 133, 0.14)', color: '#fda4af', fontSize: 12, marginBottom: 12 }}>
+                {castError}
+              </div>
+            )}
+            {castCode && (
+              <div className="panel" style={{ background: 'var(--bg-0)', textAlign: 'center', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 10 }}>
+                <span className="badge" style={{ background: '#10b981', color: '#042f2e', borderColor: 'transparent' }}>
+                  ● Ao Vivo • {castViewers} conectado(s)
+                </span>
+                {castQr && <img src={castQr} alt="QR VGFA-Cast" style={{ width: 175, height: 175, borderRadius: 12, background: '#fff', padding: 4 }} />}
+                <div className="mono" style={{ fontSize: 12, color: 'var(--amber)', wordBreak: 'break-all' }}>
+                  {castUrl || `/watch/${castCode}`}
+                </div>
+                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', justifyContent: 'center' }}>
+                  <button
+                    className="btn btn-sm btn-primary"
+                    onClick={() => {
+                      void navigator.clipboard?.writeText(castUrl || `${window.location.origin}/watch/${castCode}`);
+                      showToast('Link VGFA-Cast copiado!');
+                    }}
+                  >
+                    📋 Copiar Link do Amigo
+                  </button>
+                  <button
+                    className="btn btn-sm btn-ghost"
+                    style={{ color: '#fb7185' }}
+                    onClick={() => {
+                      stopVgfaCast();
+                      setShowCastModal(false);
+                    }}
+                  >
+                    Encerrar Transmissão
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
       )}
     </div>
   );

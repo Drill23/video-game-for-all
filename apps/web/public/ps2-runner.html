@@ -143,11 +143,15 @@
         this.file = null;
         this.url = null;
         this.size = 0;
-        this.chunkSize = 256 * 1024;
-        this.maxCachedChunks = 192; // 48 MiB RAM LRU
+        // VGFA Hyper-Stream: blocos de 1 MiB + 4 streams paralelos à frente + 96 MiB RAM LRU
+        // acoplados ao cache NVMe de 2 MiB no servidor!
+        this.chunkSize = 1024 * 1024;
+        this.maxCachedChunks = 96; // 96 MiB RAM LRU
+        this.prefetchAhead = 4; // 4 MiB à frente em paralelo
         this.cache = new Map();
         this.inFlight = new Map();
         this.bytesDownloaded = 0;
+        this.downloadMs = 0;
         this.hits = 0;
         this.misses = 0;
         this.lastChunk = -1;
@@ -196,11 +200,12 @@
       }
 
       updateHud() {
-        const mb = (this.bytesDownloaded / (1024 * 1024)).toFixed(2);
+        const mb = (this.bytesDownloaded / (1024 * 1024)).toFixed(1);
         const totalGb = (this.size / (1024 * 1024 * 1024)).toFixed(2);
         const totalOps = this.hits + this.misses;
         const hitPct = totalOps > 0 ? Math.round((this.hits / totalOps) * 100) : 0;
-        hudStats.textContent = `VGFA-Disc (${this.mode === 'url' ? 'Streaming' : 'Local'}): ${mb} MB / ${totalGb} GB • Cache ${hitPct}%`;
+        const mbps = this.downloadMs > 0 ? ((this.bytesDownloaded / (1024 * 1024)) / (this.downloadMs / 1000)).toFixed(1) : '0.0';
+        hudStats.textContent = `Hyper-Stream (${this.mode === 'url' ? 'NVMe+Range' : 'Local'}): ${mb} MB / ${totalGb} GB • ${mbps} MB/s • Cache ${hitPct}% • ${currentFps} FPS`;
       }
 
       getChunk(index, isPrefetch = false) {
@@ -219,6 +224,7 @@
         const end = Math.min(this.size - 1, start + this.chunkSize - 1);
 
         const p = (async () => {
+          const t0 = performance.now();
           let bytes;
           if (this.mode === 'file') {
             const ab = await this.file.slice(start, end + 1).arrayBuffer();
@@ -235,6 +241,7 @@
           }
           if (!isPrefetch) this.misses++;
           this.bytesDownloaded += bytes.byteLength;
+          this.downloadMs += Math.max(1, performance.now() - t0);
           this.cache.set(index, bytes);
           if (this.cache.size > this.maxCachedChunks) {
             const oldest = this.cache.keys().next().value;
@@ -270,10 +277,11 @@
           }
         }
 
-        // Prefetch sequencial (2 chunks à frente)
-        if (first === this.lastChunk + 1) {
-          void this.getChunk(last + 1, true).catch(() => {});
-          void this.getChunk(last + 2, true).catch(() => {});
+        // Prefetch paralelo agressivo (4 MiB à frente) para eliminar travadinhas de disco!
+        if (first >= this.lastChunk && first <= this.lastChunk + 2) {
+          for (let k = 1; k <= this.prefetchAhead; k++) {
+            void this.getChunk(last + k, true).catch(() => {});
+          }
         }
         this.lastChunk = last;
         return out;
@@ -297,6 +305,22 @@
     let discDevice = null;
     let booted = false;
     let pendingBoot = null;
+    let currentFps = 0;
+
+    // Monitor real de FPS
+    let frameCount = 0;
+    let fpsStart = performance.now();
+    function measureFps(ts) {
+      frameCount++;
+      if (ts - fpsStart >= 1000) {
+        currentFps = Math.round((frameCount * 1000) / (ts - fpsStart));
+        frameCount = 0;
+        fpsStart = ts;
+        if (discDevice && booted) discDevice.updateHud();
+      }
+      requestAnimationFrame(measureFps);
+    }
+    requestAnimationFrame(measureFps);
 
     async function initPlayCore() {
       if (typeof SharedArrayBuffer === 'undefined' || !globalThis.crossOriginIsolated) {

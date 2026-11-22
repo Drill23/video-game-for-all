@@ -9,6 +9,7 @@
     "dev:server": "pnpm --filter @vgfa/signaling-server dev",
     "dev:web": "pnpm --filter @vgfa/web dev",
     "build": "pnpm -r build",
+    "start:prod": "VGFA_SERVE_STATIC=1 pnpm --filter @vgfa/signaling-server start",
     "test": "pnpm --filter @vgfa/disc test && pnpm --filter @vgfa/pad test && pnpm --filter @vgfa/storage test && pnpm --filter @vgfa/runtime test && pnpm --filter @vgfa/signaling-server test",
     "typecheck": "pnpm -r typecheck"
   },
