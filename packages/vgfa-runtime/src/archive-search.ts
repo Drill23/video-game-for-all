@@ -203,7 +203,13 @@ async function smartFindDirectBrowser(
   const queryTokens = sanitized
     .toLowerCase()
     .split(/\s+/)
-    .filter((w) => w.length >= 3 && !['the', 'and', 'for', 'ps2', 'ps1', 'psp', 'n64', 'snes', 'nes', 'gba', 'atari', 'usa'].includes(w));
+    .filter(
+      (w) =>
+        (w.length >= 3 || /^[0-9]+$/.test(w) || /^(ii|iii|iv)$/i.test(w)) &&
+        !['the', 'and', 'for', 'ps2', 'ps1', 'psp', 'n64', 'snes', 'nes', 'gba', 'atari', 'usa'].includes(w),
+    );
+  const coreWords = queryTokens.filter((w) => w.length >= 3 && !/^(ii|iii|iv)$/.test(w));
+  const NON_CONSOLE_JUNK = /(windows\s*9[58]|windows\s*3|os2|ms-?dos|driver|power\s*user|shareware|clipart|encyclopedia|linux)/i;
 
   const inspected = await Promise.all(
     docs.slice(0, 8).map(async (doc) => {
@@ -225,15 +231,23 @@ async function smartFindDirectBrowser(
           .filter((f) => {
             if (f.private === true || f.private === 'true') return false;
             if (JUNK_FILE_PATTERN.test(f.name)) return false;
+            if (NON_CONSOLE_JUNK.test(f.name) || NON_CONSOLE_JUNK.test(doc.title || '')) return false;
             if (excludeOtherPlatform && excludeOtherPlatform.test(f.name)) return false;
             if (consoleId && CONSOLE_EXT_REGEX[consoleId]) {
               if (!preferredExt.test(f.name)) return false;
             } else if (!PLAYABLE_DIRECT_EXT.test(f.name)) {
               return false;
             }
-            if ((data.files?.length ?? 0) > 15 && queryTokens.length > 0) {
+            const haystack = `${f.name} ${doc.title || ''}`.toLowerCase();
+            const compact = `${f.name} ${doc.title || ''}`.toUpperCase().replace(/[^A-Z0-9]/g, '');
+            const hasSerial = serialCompact.length >= 6 && compact.includes(serialCompact);
+            if (!hasSerial && coreWords.length > 0) {
+              const hits = coreWords.filter((tok) => haystack.includes(tok)).length;
+              if (hits < (coreWords.length >= 2 ? 2 : 1)) return false;
+            }
+            if ((data.files?.length ?? 0) > 15 && coreWords.length > 0) {
               const lower = f.name.toLowerCase();
-              if (!queryTokens.some((tok) => lower.includes(tok))) return false;
+              if (!coreWords.some((tok) => lower.includes(tok))) return false;
             }
             return true;
           })
@@ -241,17 +255,22 @@ async function smartFindDirectBrowser(
           .map((f) => {
             const size = Number(f.size ?? 0);
             const lower = f.name.toLowerCase();
+            const haystack = `${f.name} ${doc.title || ''}`.toLowerCase();
             const compact = f.name.toUpperCase().replace(/[^A-Z0-9]/g, '');
-            const tokenHits = queryTokens.filter((tok) => lower.includes(tok)).length;
+            const tokenHits = queryTokens.filter((tok) => haystack.includes(tok)).length;
+            const nameHits = queryTokens.filter((tok) => lower.includes(tok)).length;
+            const allMatch = queryTokens.length > 0 && tokenHits === queryTokens.length;
             const matchesConsole = preferredExt.test(f.name);
             const matchesSerial = serialCompact.length >= 6 && compact.includes(serialCompact);
             const isPtBr = /(pt[-_\s]?br|portugu|dublad|legend)/i.test(f.name);
             const rawUrl = `https://archive.org/download/${encodeURIComponent(doc.identifier)}/${encodeURIComponent(f.name)}`;
             const score =
               (matchesConsole ? 120 : 60) +
-              (matchesSerial ? 180 : 0) +
-              (isPtBr ? 35 : 0) +
-              tokenHits * 40 +
+              (matchesSerial ? 220 : 0) +
+              (allMatch ? 180 : 0) +
+              (isPtBr ? 40 : 0) +
+              nameHits * 45 +
+              tokenHits * 25 +
               (size > 0 && size < 8_600_000_000 ? 15 : 0);
             return {
               identifier: doc.identifier,
