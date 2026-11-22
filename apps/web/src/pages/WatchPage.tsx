@@ -117,7 +117,7 @@ export const WatchPage: React.FC<Props> = ({ initialCastCode }) => {
           >
             ▶ Conectar na Transmissão
           </button>
-          <a className="btn btn-ghost" href="/">
+          <a className="btn btn-ghost" href={import.meta.env.BASE_URL}>
             ← Voltar para a Loja VGFA
           </a>
         </div>
@@ -128,7 +128,7 @@ export const WatchPage: React.FC<Props> = ({ initialCastCode }) => {
   return (
     <div className="mobile-player-shell">
       <div className="mobile-stage-bar">
-        <a className="btn btn-sm btn-ghost" href="/">
+        <a className="btn btn-sm btn-ghost" href={import.meta.env.BASE_URL}>
           ← Loja
         </a>
         <strong style={{ fontSize: 13, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>

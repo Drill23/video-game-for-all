@@ -42,7 +42,10 @@ export const QrConnectModal: React.FC<Props> = ({
         }
       }
 
-      const full = roomCode ? `${base}/pad/${roomCode}` : `${base}/pad`;
+      const basePath = (import.meta.env.BASE_URL || '/').replace(/\/$/, '');
+      const full = roomCode
+        ? `${base}${basePath}/#/pad/${roomCode}`
+        : `${base}${basePath}/#/pad`;
       if (!active) return;
       setPadUrl(full);
 
@@ -63,9 +66,10 @@ export const QrConnectModal: React.FC<Props> = ({
     };
   }, [roomCode]);
 
+  const basePath = (import.meta.env.BASE_URL || '/').replace(/\/$/, '');
   const localTestUrl = roomCode
-    ? `${window.location.origin}/pad/${roomCode}`
-    : `${window.location.origin}/pad`;
+    ? `${window.location.origin}${basePath}/#/pad/${roomCode}`
+    : `${window.location.origin}${basePath}/#/pad`;
 
   const allPads = [...connectedPads, ...bluetoothPads];
 

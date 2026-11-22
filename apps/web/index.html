@@ -8,6 +8,38 @@
     />
     <meta name="theme-color" content="#07080D" />
     <title>VIDEO GAME FOR ALL — VGFA</title>
+    <script>
+      // VGFA Nexus Service Worker: ativa COOP/COEP (SharedArrayBuffer + WebGPU + Cache WASM)
+      // automaticamente em hospedagem estática (GitHub Pages), com proteção contra loop de reload!
+      (function () {
+        if (typeof navigator === 'undefined' || !('serviceWorker' in navigator)) return;
+        const isSecure = window.isSecureContext || location.hostname === 'localhost' || location.hostname === '127.0.0.1';
+        if (!isSecure) return;
+        const swUrl = new URL('./coi-serviceworker.js', window.location.href).href;
+        navigator.serviceWorker
+          .register(swUrl)
+          .then(function (reg) {
+            if (!window.crossOriginIsolated) {
+              const reloadKey = 'vgfa_coi_reloaded_v6';
+              if (!sessionStorage.getItem(reloadKey)) {
+                const reloadNow = function () {
+                  sessionStorage.setItem(reloadKey, '1');
+                  window.location.reload();
+                };
+                if (navigator.serviceWorker.controller) {
+                  reloadNow();
+                } else if (reg.installing || reg.waiting) {
+                  const sw = reg.installing || reg.waiting;
+                  sw.addEventListener('statechange', function () {
+                    if (sw.state === 'activated') reloadNow();
+                  });
+                }
+              }
+            }
+          })
+          .catch(function () {});
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

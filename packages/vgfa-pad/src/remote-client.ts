@@ -1,4 +1,9 @@
 import { encodePadPacket } from './binary-codec.js';
+import {
+  ServerlessTrackerRoom,
+  createRtcPeer,
+  waitIceComplete,
+} from './serverless-rtc.js';
 import type { ConsoleId, PadState, RumbleCommand } from './types.js';
 
 export interface RemoteClientEvents {
@@ -11,15 +16,17 @@ export interface RemoteClientEvents {
 
 /**
  * Cliente do Controle Remoto VGFA (roda no navegador do celular após escanear o QR Code).
- * Não precisa instalar aplicativo!
+ * Suporta WebSocket local/nuvem E modo 100% Serverless P2P WebRTC (GitHub Pages!).
  */
 export class RemotePadClient {
   private ws: WebSocket | null = null;
+  private serverlessRoom: ServerlessTrackerRoom | null = null;
   private pc: RTCPeerConnection | null = null;
   private dc: RTCDataChannel | null = null;
   private slot = 0;
   private seq = 0;
   private disposed = false;
+  private wsOpenedOnce = false;
 
   constructor(
     private readonly signalingUrl: string,
@@ -34,11 +41,18 @@ export class RemotePadClient {
 
   connect(): void {
     if (this.disposed) return;
+
+    if (this.signalingUrl === 'serverless' || this.signalingUrl.startsWith('serverless://')) {
+      void this.connectServerless();
+      return;
+    }
+
     const ws = new WebSocket(this.signalingUrl);
     ws.binaryType = 'arraybuffer';
     this.ws = ws;
 
     ws.onopen = () => {
+      this.wsOpenedOnce = true;
       ws.send(
         JSON.stringify({
           type: 'pad:join',
@@ -59,12 +73,77 @@ export class RemotePadClient {
     };
 
     ws.onclose = () => {
+      if (this.serverlessRoom) return;
+      if (!this.wsOpenedOnce && !this.disposed) {
+        void this.connectServerless();
+        return;
+      }
       this.events.onDisconnected?.('Conexão encerrada');
     };
 
     ws.onerror = () => {
+      if (!this.wsOpenedOnce && !this.disposed && !this.serverlessRoom) {
+        ws.close();
+        void this.connectServerless();
+        return;
+      }
       this.events.onDisconnected?.('Erro de rede ao conectar à sala');
     };
+  }
+
+  private async connectServerless(): Promise<void> {
+    if (this.disposed || this.serverlessRoom || typeof RTCPeerConnection === 'undefined') return;
+    const pc = createRtcPeer();
+    this.pc = pc;
+    const dc = pc.createDataChannel('vgfa-pad', { ordered: false, maxRetransmits: 0 });
+    dc.binaryType = 'arraybuffer';
+    this.dc = dc;
+
+    dc.onopen = () => {
+      this.events.onTransportChanged?.('webrtc');
+      dc.send(JSON.stringify({ type: 'hello', label: this.deviceLabel }));
+    };
+    dc.onmessage = (m) => {
+      if (typeof m.data !== 'string') return;
+      try {
+        const payload = JSON.parse(m.data);
+        if (payload.type === 'welcome') {
+          this.slot = Number(payload.slot ?? 0);
+          this.events.onConnected?.({
+            slot: this.slot,
+            consoleId: (payload.consoleId as ConsoleId) || 'ps2',
+            gameTitle: String(payload.gameTitle || 'VGFA'),
+          });
+        } else if (payload.type === 'console') {
+          this.events.onConsoleChanged?.(payload.consoleId, payload.gameTitle || 'VGFA');
+        } else if (payload.type === 'rumble') {
+          this.triggerHaptics(payload);
+        }
+      } catch {}
+    };
+    dc.onclose = () => {
+      if (!this.disposed) this.events.onDisconnected?.('Conexão P2P encerrada');
+    };
+
+    const offerId = `of_${Math.random().toString(36).slice(2, 10)}`;
+    let answered = false;
+    const room = new ServerlessTrackerRoom(this.roomCode, undefined, (_from, id, sdp) => {
+      if (answered || id !== offerId || this.disposed) return;
+      answered = true;
+      void pc.setRemoteDescription(new RTCSessionDescription(sdp)).catch(() => {});
+    });
+    this.serverlessRoom = room;
+
+    try {
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      await waitIceComplete(pc);
+      if (pc.localDescription && !this.disposed) {
+        await room.sendOffer(offerId, pc.localDescription);
+      }
+    } catch {
+      this.events.onDisconnected?.('Falha ao negociar controle P2P WebRTC.');
+    }
   }
 
   sendState(state: Omit<PadState, 'slot' | 'seq'>): void {
@@ -174,6 +253,8 @@ export class RemotePadClient {
 
   dispose(): void {
     this.disposed = true;
+    this.serverlessRoom?.dispose();
+    this.serverlessRoom = null;
     this.dc?.close();
     this.pc?.close();
     this.ws?.close();

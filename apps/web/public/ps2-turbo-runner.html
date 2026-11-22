@@ -217,11 +217,71 @@
 
     <script>
       (function () {
-        const ASSET_BASE = '/api/ps2-turbo/';
+        let ASSET_BASE = '/api/ps2-turbo/';
         const BIOS_DIR = '/bios';
         const DISC_DIR = '/disc';
         const FD_SEQ = 0, FD_WIDTH = 1, FD_HEIGHT = 2, FD_PIXELS = 3, FD_VSYNC = 4, FD_WORDS = 5;
         const MAX_FRAME_DIM = 8192;
+
+        // Aplica Auto-Tune salvo pelo VGFA Nexus Optimizer (1x em tablets/mobile, 2x HD em Desktop/M1)
+        try {
+          const tuned = JSON.parse(localStorage.getItem('vgfa:nexus_profile') || 'null');
+          if (tuned && tuned.recommendedUpscale) {
+            const sel = document.getElementById('upscaleSel');
+            if (sel) sel.value = String(tuned.recommendedUpscale);
+          }
+        } catch {}
+
+        async function resolveTurboAssetBase() {
+          const staticBase = new URL('./ps2-turbo/', window.location.href).href;
+          try {
+            const probe = await fetch(staticBase + 'disc-worker.js', { method: 'HEAD' });
+            if (probe.ok) return staticBase;
+          } catch {}
+          return '/api/ps2-turbo/';
+        }
+
+        async function streamToOpfsFile(url, cleanName) {
+          if (!navigator.storage || typeof navigator.storage.getDirectory !== 'function') {
+            throw new Error('Navegador sem OPFS para gravar ISO sem servidor.');
+          }
+          const root = await navigator.storage.getDirectory();
+          const dir = await root.getDirectoryHandle('vgfa-turbo-discs', { create: true });
+          const safeKey = cleanName.replace(/[^A-Za-z0-9._-]+/g, '_').slice(0, 64) + '.iso';
+          try {
+            const existing = await dir.getFileHandle(safeKey);
+            const f = await existing.getFile();
+            if (f.size > 1024 * 1024) return f;
+          } catch {}
+
+          const resp = await fetch(url);
+          if (!resp.ok || !resp.body) throw new Error('HTTP ' + resp.status + ' ao baixar disco no modo serverless.');
+          const total = Number(resp.headers.get('Content-Length') || 0);
+          const fh = await dir.getFileHandle(safeKey + '.part', { create: true });
+          const writer = await fh.createWritable();
+          const reader = resp.body.getReader();
+          let loaded = 0;
+          const t0 = performance.now();
+          els.ovBarWrap.style.display = 'block';
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            await writer.write(value);
+            loaded += value.byteLength;
+            const pct = total > 0 ? Math.min(99, Math.round((loaded / total) * 100)) : 50;
+            const mbps = (loaded / (1024 * 1024)) / Math.max(0.1, (performance.now() - t0) / 1000);
+            setProgress(pct);
+            els.ovTitle.textContent = `Gravando ${cleanName} no SSD Virtual OPFS (${pct}%)...`;
+            els.ovDesc.textContent = `${(loaded / (1024 * 1024)).toFixed(1)} MB • ${mbps.toFixed(1)} MB/s — Salvo localmente 1 única vez (0 RAM)!`;
+          }
+          await writer.close();
+          const finalFh = await dir.getFileHandle(safeKey, { create: true });
+          const partFile = await fh.getFile();
+          const fw = await finalFh.createWritable();
+          await partFile.stream().pipeTo(fw);
+          await dir.removeEntry(safeKey + '.part').catch(() => {});
+          return await finalFh.getFile();
+        }
 
         const PAD_INPUTS = [
           'Up', 'Right', 'Down', 'Left', 'Triangle', 'Circle', 'Cross', 'Square',
@@ -544,7 +604,21 @@
             return;
           }
 
-          const reply = await callDiscWorker(msg);
+          let reply = await callDiscWorker(msg);
+          // No modo 100% Serverless (GitHub Pages via cors.archive.org), se a origem não suportar 206 Range,
+          // grava direto no SSD Virtual OPFS (0 RAM!) e monta no PCSX2 em velocidade NVMe!
+          if (!reply.ok && spec.url && /cors\.archive\.org/i.test(spec.url)) {
+            try {
+              els.overlay.classList.remove('hidden');
+              const opfsFile = await streamToOpfsFile(new URL(spec.url, window.location.href).href, cleanName);
+              reply = await callDiscWorker({ type: 'open', file: opfsFile, name: cleanName });
+            } catch (opfsErr) {
+              els.ovTitle.textContent = 'Erro ao gravar disco no SSD OPFS';
+              els.ovDesc.textContent = opfsErr && opfsErr.message ? opfsErr.message : String(opfsErr);
+              els.overlay.classList.remove('hidden');
+              return;
+            }
+          }
           if (!reply.ok) {
             els.ovTitle.textContent = 'Erro ao montar disco no PCSX2 WebGPU';
             els.ovDesc.textContent = reply.error?.message || 'Falha ao abrir a URL/ISO do disco.';
@@ -709,6 +783,7 @@
         }
 
         async function initRuntime() {
+          ASSET_BASE = await resolveTurboAssetBase();
           savedBios = await loadSavedBios();
 
           if (!window.crossOriginIsolated) {

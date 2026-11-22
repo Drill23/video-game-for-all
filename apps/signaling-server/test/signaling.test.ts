@@ -280,3 +280,59 @@ test('VGFA-Cast cria transmissão, pareia espectador remoto e encaminha SDP + co
     await srv.close();
   }
 });
+
+test('VGFA Hyper-Stream v0.6 recupera automaticamente de rajadas HTTP 503 sem corromper setores', async () => {
+  const totalSize = 5 * 1024 * 1024;
+  const isoBuf = Buffer.alloc(totalSize);
+  for (let i = 0; i < totalSize; i += 4096) isoBuf.writeUInt32BE((0xdeadbeef ^ i) >>> 0, i);
+
+  let blockAttempts = 0;
+  const tag = `retry503-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  const upstream = http.createServer((req, res) => {
+    const range = req.headers.range || '';
+    const m = /bytes=(\d+)-(\d+)/.exec(range);
+    if (!m) {
+      res.writeHead(200, { 'Content-Length': String(totalSize) });
+      res.end();
+      return;
+    }
+    const start = Number(m[1]);
+    const end = Math.min(totalSize - 1, Number(m[2]));
+    // Probe 0-0 passa; nas 2 primeiras tentativas de bloco 2 MiB simula HTTP 503 do Internet Archive!
+    if (end - start > 0) {
+      blockAttempts++;
+      if (blockAttempts <= 2) {
+        res.writeHead(503, { 'Content-Type': 'text/plain' });
+        res.end('Service Unavailable');
+        return;
+      }
+    }
+    res.writeHead(206, {
+      'Content-Type': 'application/octet-stream',
+      'Content-Range': `bytes ${start}-${end}/${totalSize}`,
+      'Accept-Ranges': 'bytes',
+      'Content-Length': String(end - start + 1),
+    });
+    res.end(isoBuf.subarray(start, end + 1));
+  });
+
+  await new Promise<void>((r) => upstream.listen(0, '127.0.0.1', () => r()));
+  const upPort = (upstream.address() as { port: number }).port;
+  const srv = createSignalingServer(0);
+  const proxyPort = await srv.start();
+
+  try {
+    const target = encodeURIComponent(`http://127.0.0.1:${upPort}/${tag}.iso`);
+    const res = await fetch(`http://127.0.0.1:${proxyPort}/api/proxy/stream?url=${target}`, {
+      headers: { Range: 'bytes=4096-8191' },
+    });
+    assert.equal(res.status, 206);
+    const data = Buffer.from(await res.arrayBuffer());
+    assert.equal(data.length, 4096);
+    assert.equal(data.readUInt32BE(0), (0xdeadbeef ^ 4096) >>> 0);
+    assert.ok(blockAttempts >= 3, 'Deve ter recuperado após os 2 erros HTTP 503 simulados');
+  } finally {
+    await srv.close();
+    await new Promise<void>((r) => upstream.close(() => r()));
+  }
+});

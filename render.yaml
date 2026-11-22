@@ -1,0 +1,12 @@
+# Blueprint 1-Clique Grátis no Render (dorme quando ocioso e acorda automaticamente ao abrir o link!)
+services:
+  - type: web
+    name: video-game-for-all
+    runtime: docker
+    plan: free
+    healthCheckPath: /api/health
+    envVars:
+      - key: VGFA_SERVE_STATIC
+        value: "1"
+      - key: NODE_ENV
+        value: production

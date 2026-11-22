@@ -335,14 +335,14 @@ export const Ps2LabPanel: React.FC<Props> = ({
               onIframeChange?.(el);
             }}
             title="VGFA PS2 Turbo WebGPU 60 FPS"
-            src="/ps2-turbo-runner.html"
+            src={`${import.meta.env.BASE_URL}ps2-turbo-runner.html`}
             style={{ width: '100%', height: 560, border: 'none', display: 'block', background: '#000' }}
             allow="gamepad *; fullscreen *; autoplay *"
           />
         </div>
       )}
 
-      {/* MOTOR 2: VGFA-PS2 INSTANTÂNEO (Sem BIOS — Play.wasm + Hyper-Stream NVMe) */}
+      {/* MOTOR 2: VGFA-PS2 INSTANTÂNEO (Sem BIOS — Play.wasm + OPFS Virtual SSD Anti-503) */}
       {engineMode === 'vgfa-native' && (
         <div style={{ borderRadius: 12, overflow: 'hidden', border: '1px solid var(--border)', background: '#000' }}>
           <iframe
@@ -352,7 +352,7 @@ export const Ps2LabPanel: React.FC<Props> = ({
               onIframeChange?.(el);
             }}
             title="VGFA PlayStation 2 Instant Engine"
-            src="/ps2-runner.html"
+            src={`${import.meta.env.BASE_URL}ps2-runner.html`}
             style={{ width: '100%', height: 560, border: 'none', display: 'block', background: '#000' }}
             allow="gamepad *; fullscreen *; autoplay *"
           />

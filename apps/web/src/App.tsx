@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import type { ConsoleId } from '@vgfa/pad';
 import {
   ALL_STORE_GAMES,
@@ -7,6 +7,7 @@ import {
   FREE_PLAYABLE_ROMS,
   STORE_CATALOG,
   detectConsoleFromFilename,
+  detectVgfaBackend,
   getUserSourceForGame,
   smartFindGameOptions,
   type SmartFindOption,
@@ -21,6 +22,7 @@ import {
 import { TRANSLATIONS } from './i18n/translations.js';
 import { AuthModal } from './components/AuthModal.js';
 import { GameDetailModal } from './components/GameDetailModal.js';
+import { NexusOptimizerModal, loadNexusProfile, type NexusProfile } from './components/NexusOptimizerModal.js';
 import { SaveManagerModal } from './components/SaveManagerModal.js';
 import { ShareLinkModal } from './components/ShareLinkModal.js';
 import { ControllerPage } from './pages/ControllerPage.js';
@@ -39,15 +41,31 @@ function fmtSize(bytes: number): string {
   return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
 }
 
-export const App: React.FC = () => {
-  const pathname = typeof window !== 'undefined' ? window.location.pathname : '/';
-  if (pathname === '/pad' || pathname.startsWith('/pad/')) {
-    const code = pathname.startsWith('/pad/') ? decodeURIComponent(pathname.slice(5)) : undefined;
-    return <ControllerPage initialRoomCode={code} />;
+function resolveSubRoute(): { kind: 'home' | 'pad' | 'watch'; code?: string } {
+  if (typeof window === 'undefined') return { kind: 'home' };
+  const hash = window.location.hash.replace(/^#/, '');
+  const path = window.location.pathname;
+  const candidates = [hash, path];
+  for (const c of candidates) {
+    const padMatch = /(?:^|\/)pad(?:\/([^/?#]+))?$/i.exec(c);
+    if (padMatch) {
+      return { kind: 'pad', code: padMatch[1] ? decodeURIComponent(padMatch[1]) : undefined };
+    }
+    const watchMatch = /(?:^|\/)watch(?:\/([^/?#]+))?$/i.exec(c);
+    if (watchMatch) {
+      return { kind: 'watch', code: watchMatch[1] ? decodeURIComponent(watchMatch[1]) : undefined };
+    }
   }
-  if (pathname === '/watch' || pathname.startsWith('/watch/')) {
-    const code = pathname.startsWith('/watch/') ? decodeURIComponent(pathname.slice(7)) : undefined;
-    return <WatchPage initialCastCode={code} />;
+  return { kind: 'home' };
+}
+
+export const App: React.FC = () => {
+  const subRoute = resolveSubRoute();
+  if (subRoute.kind === 'pad') {
+    return <ControllerPage initialRoomCode={subRoute.code} />;
+  }
+  if (subRoute.kind === 'watch') {
+    return <WatchPage initialCastCode={subRoute.code} />;
   }
 
   const auth = useMemo(() => new VgfaAuthStore(), []);
@@ -63,6 +81,12 @@ export const App: React.FC = () => {
   const [showAuth, setShowAuth] = useState(false);
   const [showSaves, setShowSaves] = useState(false);
   const [showShare, setShowShare] = useState(false);
+  const [showOptimizer, setShowOptimizer] = useState(false);
+  const [nexusProfile, setNexusProfile] = useState<NexusProfile | null>(() => loadNexusProfile());
+
+  useEffect(() => {
+    void detectVgfaBackend();
+  }, []);
 
   // Busca inteligente livre na web (somente fontes abertas verificadas HTTP 200!)
   const [webFinding, setWebFinding] = useState(false);
@@ -197,10 +221,17 @@ export const App: React.FC = () => {
                 }}
               />
             </label>
+            <button
+              className={`btn btn-sm ${nexusProfile ? 'btn-ghost' : 'btn-primary'}`}
+              style={nexusProfile ? { borderColor: 'var(--emerald)', color: '#6ee7b7' } : undefined}
+              onClick={() => setShowOptimizer(true)}
+            >
+              {nexusProfile ? '⚡ Nexus Ativo' : '⚡ Otimizar'}
+            </button>
             <button className="btn btn-sm btn-cyan" onClick={() => setShowShare(true)}>
               🌐 Link Público
             </button>
-            <a className="btn btn-sm btn-ghost" href="/pad" target="_blank" rel="noreferrer">
+            <a className="btn btn-sm btn-ghost" href={`${import.meta.env.BASE_URL}#/pad`} target="_blank" rel="noreferrer">
               📱 {t.phonePadMode}
             </a>
             <button className="btn btn-sm btn-ghost" onClick={() => setShowSaves(true)}>
@@ -251,6 +282,32 @@ export const App: React.FC = () => {
         />
       ) : (
         <main className="vgfa-shell">
+          {/* Banner inteligente: pergunta para ativar os Otimizadores Leves do navegador (1 única vez!) */}
+          {!nexusProfile && (
+            <div
+              className="panel"
+              style={{
+                marginTop: 14,
+                padding: '12px 16px',
+                background: 'linear-gradient(135deg, rgba(255, 181, 71, 0.12), rgba(56, 189, 248, 0.1))',
+                borderColor: 'rgba(255, 181, 71, 0.4)',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                gap: 12,
+                flexWrap: 'wrap',
+              }}
+            >
+              <div style={{ fontSize: 13, lineHeight: 1.45 }}>
+                <strong style={{ color: 'var(--amber)' }}>⚡ Destrave o Modo Ultra no Navegador (Recomendado):</strong>{' '}
+                instale os otimizadores leves em cache local + Disco Virtual SSD OPFS para cortar travamentos e usar 75% menos RAM em jogos de PS2!
+              </div>
+              <button className="btn btn-sm btn-primary" onClick={() => setShowOptimizer(true)}>
+                ⚡ Sim, Otimizar Agora (1 clique)
+              </button>
+            </div>
+          )}
+
           {/* Hero Simples e Direto */}
           <section className="hero" style={{ gridTemplateColumns: '1fr', gap: 18 }}>
             <div style={{ maxWidth: 820 }}>
@@ -558,6 +615,13 @@ export const App: React.FC = () => {
       )}
 
       {showShare && <ShareLinkModal onClose={() => setShowShare(false)} />}
+
+      {showOptimizer && (
+        <NexusOptimizerModal
+          onClose={() => setShowOptimizer(false)}
+          onActivated={(p) => setNexusProfile(p)}
+        />
+      )}
     </>
   );
 };

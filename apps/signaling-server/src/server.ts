@@ -289,12 +289,69 @@ async function tryServeStaticFile(res: http.ServerResponse, pathname: string): P
   return false;
 }
 
-// ==================== VGFA HYPER-STREAM: Cache de Blocos 2 MiB em NVMe + Prefetch Paralelo 4x ====================
+// ==================== VGFA HYPER-STREAM v0.6: NVMe 2 MiB + Semáforo Anti-503 + 5x Retry ====================
 const HYPER_BLOCK_SIZE = 2 * 1024 * 1024; // 2 MiB por bloco alinhado
-const HYPER_PREFETCH_BLOCKS = 3; // 6 MiB pré-carregados à frente em paralelo!
+const HYPER_PREFETCH_BLOCKS = 2; // 4 MiB pré-carregados sem disparar rate-limit 503
+const HYPER_MAX_UPSTREAM_CONCURRENCY = 3;
 const HYPER_CACHE_ROOT = path.join(os.tmpdir(), 'vgfa-hyper-stream-cache');
 const hyperSizeCache = new Map<string, { size: number; resolvedUrl: string; contentType: string }>();
 const hyperInFlight = new Map<string, Promise<Buffer>>();
+
+let hyperActiveUpstream = 0;
+const hyperUpstreamQueue: Array<() => void> = [];
+
+function withHyperUpstreamSlot<T>(fn: () => Promise<T>): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const run = () => {
+      hyperActiveUpstream++;
+      fn()
+        .then(resolve, reject)
+        .finally(() => {
+          hyperActiveUpstream--;
+          const next = hyperUpstreamQueue.shift();
+          if (next) next();
+        });
+    };
+    if (hyperActiveUpstream < HYPER_MAX_UPSTREAM_CONCURRENCY) run();
+    else hyperUpstreamQueue.push(run);
+  });
+}
+
+async function fetchUpstreamResilient(
+  url: string,
+  init: RequestInit,
+  maxAttempts = 5,
+): Promise<Response> {
+  let lastErr: unknown = null;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      const res = await fetch(url, {
+        ...init,
+        signal: AbortSignal.timeout(18_000),
+      });
+      if (res.status === 429 || res.status === 500 || res.status === 502 || res.status === 503 || res.status === 504) {
+        await res.body?.cancel().catch(() => {});
+        lastErr = new Error(`HTTP ${res.status}`);
+        if (attempt < maxAttempts) {
+          const waitMs = Math.min(4800, 350 * Math.pow(2, attempt - 1)) + Math.floor(Math.random() * 180);
+          await new Promise((r) => setTimeout(r, waitMs));
+          continue;
+        }
+        throw lastErr;
+      }
+      return res;
+    } catch (err) {
+      lastErr = err;
+      if (attempt < maxAttempts) {
+        const waitMs = Math.min(4800, 350 * Math.pow(2, attempt - 1)) + Math.floor(Math.random() * 180);
+        await new Promise((r) => setTimeout(r, waitMs));
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw lastErr ?? new Error('Upstream unavailable');
+}
 
 function hashKey(s: string): string {
   return crypto.createHash('sha1').update(s).digest('hex').slice(0, 16);
@@ -304,15 +361,18 @@ async function resolveHyperMeta(targetUrl: string): Promise<{ size: number; reso
   const cached = hyperSizeCache.get(targetUrl);
   if (cached) return cached;
 
-  const res = await fetch(targetUrl, {
-    method: 'GET',
-    headers: {
-      'User-Agent': 'VGFA-HyperStream/0.5',
-      Range: 'bytes=0-0',
+  const res = await fetchUpstreamResilient(
+    targetUrl,
+    {
+      method: 'GET',
+      headers: {
+        'User-Agent': 'VGFA-HyperStream/0.6',
+        Range: 'bytes=0-0',
+      },
+      redirect: 'follow',
     },
-    redirect: 'follow',
-    signal: AbortSignal.timeout(12_000),
-  });
+    3,
+  );
 
   if (res.status !== 206) {
     await res.body?.cancel().catch(() => {});
@@ -358,16 +418,19 @@ async function fetchHyperBlock(
   const existing = hyperInFlight.get(key);
   if (existing) return existing;
 
-  const job = (async () => {
-    const upstream = await fetch(meta.resolvedUrl, {
-      method: 'GET',
-      headers: {
-        'User-Agent': 'VGFA-HyperStream/0.5',
-        Range: `bytes=${start}-${end}`,
+  const job = withHyperUpstreamSlot(async () => {
+    const upstream = await fetchUpstreamResilient(
+      meta.resolvedUrl,
+      {
+        method: 'GET',
+        headers: {
+          'User-Agent': 'VGFA-HyperStream/0.6',
+          Range: `bytes=${start}-${end}`,
+        },
+        redirect: 'follow',
       },
-      redirect: 'follow',
-      signal: AbortSignal.timeout(25_000),
-    });
+      5,
+    );
 
     if (upstream.status !== 206 && upstream.status !== 200) {
       await upstream.body?.cancel().catch(() => {});
@@ -381,7 +444,7 @@ async function fetchHyperBlock(
       .then(() => fs.writeFile(blockPath, buf))
       .catch(() => {});
     return buf;
-  })().finally(() => {
+  }).finally(() => {
     hyperInFlight.delete(key);
   });
 
@@ -799,36 +862,60 @@ async function handleArchiveSmartFind(res: http.ServerResponse, urlObj: URL): Pr
   }
 
   const sanitized = q.replace(/[()"]/g, ' ');
-  const params = new URLSearchParams({
-    q: `(${sanitized}) AND mediatype:software AND NOT access-restricted-item:true`,
-    'fl[]': 'identifier,title,year,downloads',
-    'sort[]': 'downloads desc',
-    rows: '8',
-    page: '1',
-    output: 'json',
-  });
-
-  try {
-    const searchRes = await fetch(`https://archive.org/advancedsearch.php?${params.toString()}`, {
-      headers: { Accept: 'application/json', 'User-Agent': 'VGFA/0.3' },
+  const runSearchQuery = async (expr: string, rows = 8): Promise<Array<{ identifier: string; title?: string; year?: string | number }>> => {
+    const params = new URLSearchParams({
+      q: expr,
+      'fl[]': 'identifier,title,year,downloads',
+      'sort[]': 'downloads desc',
+      rows: String(rows),
+      page: '1',
+      output: 'json',
+    });
+    const r = await fetch(`https://archive.org/advancedsearch.php?${params.toString()}`, {
+      headers: { Accept: 'application/json', 'User-Agent': 'VGFA/0.6' },
       signal: AbortSignal.timeout(8_000),
     });
-    if (!searchRes.ok) {
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ options: [], note: 'Acervo público temporariamente indisponível.' }));
-      return;
-    }
-
-    const searchJson = (await searchRes.json()) as {
+    if (!r.ok) return [];
+    const j = (await r.json()) as {
       response?: { docs?: Array<{ identifier: string; title?: string; year?: string | number }> };
     };
-    const docs = searchJson.response?.docs ?? [];
+    return j.response?.docs ?? [];
+  };
+
+  try {
+    // Busca multi-passe: título + console, serial exato (ex.: SLUS-21678) e fallback amplo (mais fontes!)
+    const queries: Array<Promise<Array<{ identifier: string; title?: string; year?: string | number }>>> = [
+      runSearchQuery(`(${sanitized}) AND mediatype:software AND NOT access-restricted-item:true`, 10),
+    ];
+    if (serialParam.length >= 6) {
+      queries.push(
+        runSearchQuery(`("${serialParam}" OR "${serialCompact}") AND NOT access-restricted-item:true`, 6),
+      );
+    }
+    const baseClean = sanitized.replace(/\b(ps2|ps1|psp|n64|snes|nes|gba|atari|mega drive|playstation 2)\b/gi, '').trim();
+    if (baseClean.length >= 3 && baseClean !== sanitized) {
+      queries.push(
+        runSearchQuery(`(${baseClean}) AND (${consoleId || 'rom'}) AND NOT access-restricted-item:true`, 6),
+      );
+    }
+
+    const docLists = await Promise.all(queries);
+    const seenIds = new Set<string>();
+    const docs: Array<{ identifier: string; title?: string; year?: string | number }> = [];
+    for (const list of docLists) {
+      for (const d of list) {
+        if (!seenIds.has(d.identifier)) {
+          seenIds.add(d.identifier);
+          docs.push(d);
+        }
+      }
+    }
 
     const inspected = await Promise.all(
-      docs.slice(0, 6).map(async (doc) => {
+      docs.slice(0, 10).map(async (doc) => {
         try {
           const metaRes = await fetch(`https://archive.org/metadata/${encodeURIComponent(doc.identifier)}`, {
-            headers: { Accept: 'application/json', 'User-Agent': 'VGFA/0.3' },
+            headers: { Accept: 'application/json', 'User-Agent': 'VGFA/0.6' },
             signal: AbortSignal.timeout(5_000),
           });
           if (!metaRes.ok) return [];
@@ -839,6 +926,11 @@ async function handleArchiveSmartFind(res: http.ServerResponse, urlObj: URL): Pr
           if (String(data.metadata?.access_restricted_item || '').toLowerCase() === 'true') {
             return [];
           }
+
+          const torrentFile = (data.files ?? []).find((f) => /\.torrent$/i.test(f.name));
+          const torrentUrl = torrentFile
+            ? `https://archive.org/download/${encodeURIComponent(doc.identifier)}/${encodeURIComponent(torrentFile.name)}`
+            : undefined;
 
           // Extrai palavras-chave relevantes do título buscado para filtrar coleções gigantes
           const queryTokens = sanitized
@@ -851,7 +943,6 @@ async function handleArchiveSmartFind(res: http.ServerResponse, urlObj: URL): Pr
               const isPriv = f.private === true || f.private === 'true';
               if (isPriv) return false;
               if (JUNK_FILE_PATTERN.test(f.name)) return false;
-              // Bloqueia arquivos de OUTROS consoles (ex.: nunca devolver PSP/Chains of Olympus quando pediu PS2!)
               if (excludeOtherPlatform && excludeOtherPlatform.test(f.name)) return false;
               if (consoleId && CONSOLE_EXT_REGEX[consoleId]) {
                 if (!preferredExt.test(f.name)) return false;
@@ -888,6 +979,7 @@ async function handleArchiveSmartFind(res: http.ServerResponse, urlObj: URL): Pr
                 size,
                 url: rawUrl,
                 proxyUrl: `/api/proxy/stream?url=${encodeURIComponent(rawUrl)}`,
+                torrentUrl,
                 playableDirectly: true,
                 isCompressed: false,
                 score,
@@ -902,7 +994,7 @@ async function handleArchiveSmartFind(res: http.ServerResponse, urlObj: URL): Pr
     const candidates = inspected
       .flat()
       .sort((a, b) => b.score - a.score || a.size - b.size)
-      .slice(0, 6);
+      .slice(0, 8);
 
     // Verifica de verdade via HEAD se o arquivo realmente está acessível (HTTP 200/206) antes de exibir!
     const verified: Array<(typeof candidates)[number]> = [];

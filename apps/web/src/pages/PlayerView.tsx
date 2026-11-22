@@ -69,6 +69,7 @@ export const PlayerView: React.FC<Props> = ({ t, session, userId, saveStore, onB
   const consoleDef = CONSOLE_MAP[session.consoleId];
   const padProfile = CONTROLLER_PROFILES[session.consoleId];
 
+  const stageWrapRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
   const ps2IframeRef = useRef<HTMLIFrameElement | null>(null);
@@ -193,7 +194,8 @@ export const PlayerView: React.FC<Props> = ({ t, session, userId, saveStore, onB
               }
             } catch {}
           }
-          const full = `${base}/watch/${code}`;
+          const basePath = (import.meta.env.BASE_URL || '/').replace(/\/$/, '');
+          const full = `${base}${basePath}/#/watch/${code}`;
           setCastUrl(full);
           const png = await QRCode.toDataURL(full, {
             width: 200,
@@ -289,7 +291,8 @@ export const PlayerView: React.FC<Props> = ({ t, session, userId, saveStore, onB
           // fallback
         }
       }
-      const full = `${base}/pad/${roomCode}`;
+      const basePath = (import.meta.env.BASE_URL || '/').replace(/\/$/, '');
+      const full = `${base}${basePath}/#/pad/${roomCode}`;
       if (!active) return;
       setPadUrl(full);
       const png = await QRCode.toDataURL(full, {
@@ -702,15 +705,28 @@ export const PlayerView: React.FC<Props> = ({ t, session, userId, saveStore, onB
           <strong style={{ fontSize: 13, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
             {session.title}
           </strong>
-          <button
-            className="btn btn-sm btn-ghost"
-            onClick={() => setShowMobileTouchPad((v) => !v)}
-          >
-            {showMobileTouchPad ? '🎮 Ocultar Pad' : '🎮 Mostrar Pad'}
-          </button>
+          <div style={{ display: 'flex', gap: 6 }}>
+            <button
+              className="btn btn-sm btn-ghost"
+              onClick={() => {
+                const el = stageWrapRef.current;
+                if (!el) return;
+                if (document.fullscreenElement) void document.exitFullscreen().catch(() => {});
+                else void el.requestFullscreen?.().catch(() => {});
+              }}
+            >
+              ⛶
+            </button>
+            <button
+              className="btn btn-sm btn-ghost"
+              onClick={() => setShowMobileTouchPad((v) => !v)}
+            >
+              {showMobileTouchPad ? '🎮 Ocultar' : '🎮 Pad'}
+            </button>
+          </div>
         </div>
 
-        <div className="mobile-screen-area">
+        <div className="mobile-screen-area" ref={stageWrapRef}>
           {session.mode === 'emulatorjs-rom' ? (
             ejsSrcDoc ? (
               <iframe
@@ -778,11 +794,21 @@ export const PlayerView: React.FC<Props> = ({ t, session, userId, saveStore, onB
     );
   }
 
+  const toggleFullscreen = useCallback(() => {
+    const el = stageWrapRef.current;
+    if (!el) return;
+    if (document.fullscreenElement) {
+      void document.exitFullscreen().catch(() => {});
+    } else {
+      void el.requestFullscreen?.().catch(() => {});
+    }
+  }, []);
+
   // ==================== TELA DE JOGO LIMPA EM 60 FPS (DESKTOP / TV) ====================
   return (
     <div className="vgfa-shell" style={{ maxWidth: showAdvanced ? 1360 : 1080 }}>
       <div style={{ marginTop: 18 }}>
-        <div className="stage-box">
+        <div className="stage-box" ref={stageWrapRef}>
           <div className="stage-bar">
             <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
               <button className="btn btn-sm btn-ghost" onClick={onBack}>
@@ -813,6 +839,9 @@ export const PlayerView: React.FC<Props> = ({ t, session, userId, saveStore, onB
                 }}
               >
                 📡 {castCode ? `Transmitindo (${castViewers})` : 'Transmitir 60 FPS'}
+              </button>
+              <button className="btn btn-sm btn-ghost" onClick={toggleFullscreen}>
+                ⛶ Tela Cheia
               </button>
               {session.mode === 'builtin-arcade' && (
                 <button className="btn btn-sm btn-cyan" onClick={() => void handleSaveBuiltin()}>

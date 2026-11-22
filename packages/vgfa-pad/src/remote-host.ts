@@ -1,4 +1,10 @@
 import { decodePadPacket } from './binary-codec.js';
+import {
+  ServerlessTrackerRoom,
+  createRtcPeer,
+  generateLocalRoomCode,
+  waitIceComplete,
+} from './serverless-rtc.js';
 import type { ConnectedPadInfo, ConsoleId, PadState, RumbleCommand } from './types.js';
 
 export interface RemoteHostEvents {
@@ -23,20 +29,19 @@ interface PeerSlot {
 /**
  * Host do Controle Remoto VGFA (roda na aba do jogo no PC/TV).
  *
- * - Cria sala no Signaling Server (código curto para QR Code).
- * - Tenta upgrade automático para WebRTC DataChannel (ordered:false, maxRetransmits:0)
- *   para latência < 10 ms; enquanto negocia (ou se WebRTC indisponível), aceita pacotes
- *   binários de 16 bytes direto pelo WebSocket sem perder um único frame.
- * - Atualiza o layout do celular em tempo real sempre que o console muda (Atari → PS2).
+ * - Suporta servidor WebSocket local/nuvem (/ws) E modo 100% Serverless (GitHub Pages!)
+ *   via trackers WebTorrent WSS + WebRTC DataChannel direto (0 servidor backend!).
  */
 export class RemotePadHost {
   private ws: WebSocket | null = null;
+  private serverlessRoom: ServerlessTrackerRoom | null = null;
   private roomCode: string | null = null;
   private consoleId: ConsoleId;
   private gameTitle: string;
   private readonly peers = new Map<string, PeerSlot>();
   private readonly latestStates = new Map<number, PadState>();
   private disposed = false;
+  private wsConnectedOnce = false;
 
   constructor(
     private readonly signalingUrl: string,
@@ -76,11 +81,18 @@ export class RemotePadHost {
   connect(): void {
     if (this.disposed) return;
     this.events.onStatusChange?.('connecting');
+
+    if (this.signalingUrl === 'serverless' || this.signalingUrl.startsWith('serverless://')) {
+      this.connectServerless();
+      return;
+    }
+
     const ws = new WebSocket(this.signalingUrl);
     ws.binaryType = 'arraybuffer';
     this.ws = ws;
 
     ws.onopen = () => {
+      this.wsConnectedOnce = true;
       this.events.onStatusChange?.('connected');
       this.sendJson({
         type: 'host:create',
@@ -103,15 +115,121 @@ export class RemotePadHost {
     };
 
     ws.onerror = () => {
+      if (!this.wsConnectedOnce && !this.disposed && !this.serverlessRoom) {
+        // Ambiente estático sem servidor /ws (ex.: GitHub Pages) -> ativa pareamento P2P Serverless!
+        ws.close();
+        this.connectServerless();
+        return;
+      }
       this.events.onStatusChange?.('error', 'Falha na conexão com o servidor de controles');
     };
 
     ws.onclose = () => {
+      if (this.serverlessRoom) return;
+      if (!this.wsConnectedOnce && !this.disposed) {
+        this.connectServerless();
+        return;
+      }
       this.events.onStatusChange?.('disconnected');
       if (!this.disposed) {
         setTimeout(() => this.connect(), 2500);
       }
     };
+  }
+
+  private connectServerless(): void {
+    if (this.disposed || this.serverlessRoom) return;
+    const code = this.roomCode || generateLocalRoomCode('VGFA');
+    this.roomCode = code;
+    this.events.onStatusChange?.('connected', 'Modo P2P Serverless (GitHub Pages)');
+    this.events.onRoomCreated?.(code);
+
+    const seenOffers = new Set<string>();
+    const room = new ServerlessTrackerRoom(code, (fromPeerId, offerId, sdp, trackerWs) => {
+      if (seenOffers.has(offerId) || this.disposed) return;
+      seenOffers.add(offerId);
+      void this.acceptServerlessPeer(fromPeerId, offerId, sdp, trackerWs);
+    });
+    this.serverlessRoom = room;
+    void room.startHost();
+  }
+
+  private async acceptServerlessPeer(
+    fromPeerId: string,
+    offerId: string,
+    sdp: RTCSessionDescriptionInit,
+    trackerWs: WebSocket,
+  ): Promise<void> {
+    if (typeof RTCPeerConnection === 'undefined') return;
+    const usedSlots = new Set(Array.from(this.peers.values()).map((p) => p.slot));
+    let freeSlot = -1;
+    for (let s = 0; s < 4; s++) {
+      if (!usedSlots.has(s)) {
+        freeSlot = s;
+        break;
+      }
+    }
+    if (freeSlot === -1) return;
+
+    const pc = createRtcPeer();
+    const peer: PeerSlot = {
+      peerId: fromPeerId,
+      slot: freeSlot,
+      label: `Celular P${freeSlot + 1} (P2P)`,
+      pc,
+      transport: 'phone-webrtc',
+      lastSeq: -1,
+      connectedAt: Date.now(),
+    };
+    this.peers.set(fromPeerId, peer);
+
+    pc.ondatachannel = (ev) => {
+      const dc = ev.channel;
+      dc.binaryType = 'arraybuffer';
+      peer.dc = dc;
+      dc.onopen = () => {
+        dc.send(
+          JSON.stringify({
+            type: 'welcome',
+            slot: peer.slot,
+            consoleId: this.consoleId,
+            gameTitle: this.gameTitle,
+          }),
+        );
+        this.emitPads();
+      };
+      dc.onmessage = (m) => {
+        if (m.data instanceof ArrayBuffer) {
+          this.handleBinaryPacket(m.data);
+        } else if (typeof m.data === 'string') {
+          try {
+            const j = JSON.parse(m.data) as { type?: string; label?: string };
+            if (j.type === 'hello' && j.label) {
+              peer.label = j.label;
+              this.emitPads();
+            }
+          } catch {}
+        }
+      };
+      dc.onclose = () => {
+        this.latestStates.delete(peer.slot);
+        this.peers.delete(fromPeerId);
+        this.emitPads();
+      };
+    };
+
+    try {
+      await pc.setRemoteDescription(new RTCSessionDescription(sdp));
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+      await waitIceComplete(pc);
+      if (pc.localDescription && this.serverlessRoom) {
+        this.serverlessRoom.sendAnswer(trackerWs, fromPeerId, offerId, pc.localDescription);
+      }
+    } catch {
+      pc.close();
+      this.peers.delete(fromPeerId);
+    }
   }
 
   setActiveConsole(consoleId: ConsoleId, gameTitle?: string): void {
@@ -268,6 +386,8 @@ export class RemotePadHost {
 
   dispose(): void {
     this.disposed = true;
+    this.serverlessRoom?.dispose();
+    this.serverlessRoom = null;
     for (const peer of this.peers.values()) {
       peer.dc?.close();
       peer.pc?.close();
