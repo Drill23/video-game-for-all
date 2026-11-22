@@ -43,12 +43,14 @@ export interface SmartFindOption {
 export async function smartFindGameOptions(
   query: string,
   consoleId?: ConsoleId,
+  serial?: string,
   fetchImpl: typeof fetch = fetch,
 ): Promise<{ options: SmartFindOption[]; note?: string }> {
   const clean = query.trim();
   if (!clean || typeof window === 'undefined') return { options: [] };
   const params = new URLSearchParams({ q: clean });
   if (consoleId) params.set('console', consoleId);
+  if (serial) params.set('serial', serial);
   const res = await fetchImpl(`/api/archive/smart-find?${params.toString()}`);
   if (!res.ok) return { options: [], note: 'Acervo temporariamente indisponível.' };
   const data = (await res.json()) as { options?: SmartFindOption[]; note?: string };

@@ -61,7 +61,7 @@ export const GameDetailModal: React.FC<Props> = ({
     let active = true;
     setFinding(true);
     setSmartNote(null);
-    void smartFindGameOptions(game.searchHint, game.consoleId)
+    void smartFindGameOptions(game.searchHint, game.consoleId, game.serial)
       .then((res) => {
         if (!active) return;
         setSmartOptions(res.options);

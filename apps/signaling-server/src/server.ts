@@ -1,5 +1,7 @@
+import fs from 'node:fs/promises';
 import http from 'node:http';
 import os from 'node:os';
+import path from 'node:path';
 import { Readable } from 'node:stream';
 import { pathToFileURL } from 'node:url';
 import { WebSocketServer, WebSocket } from 'ws';
@@ -26,6 +28,18 @@ interface Room {
 const PLAYABLE_DIRECT_EXT = /\.(a26|nes|fds|sfc|smc|md|gen|smd|gb|gbc|gba|z64|n64|v64|iso|chd|cso|zso|bin|cue|pbp|elf)$/i;
 const ARCHIVE_COMPRESSED_EXT = /\.(zip|7z|rar)$/i;
 const JUNK_FILE_PATTERN = /(preview|image|imgs|boxart|cover|thumb|manual|artwork|onion|garlic|theme|soundtrack|ost|video|movie|screenshot|readme|changelog)/i;
+
+const PLATFORM_EXCLUSION_REGEX: Record<string, RegExp> = {
+  ps2: /(^|[\/_\-\s])(psp|ps1|psx|ps3|gamecube|wii|dreamcast|xbox|gba|snes|nes|n64)([\/_\-\s]|$)/i,
+  psp: /(^|[\/_\-\s])(ps2|ps1|psx|ps3|gamecube|wii|xbox)([\/_\-\s]|$)/i,
+  ps1: /(^|[\/_\-\s])(ps2|psp|ps3|gamecube|wii|xbox)([\/_\-\s]|$)/i,
+  n64: /(^|[\/_\-\s])(ps2|psp|ps1|psx|gba|snes|nes|gamecube|wii)([\/_\-\s]|$)/i,
+  snes: /(^|[\/_\-\s])(ps2|psp|ps1|n64|gba|nes|megadrive|genesis)([\/_\-\s]|$)/i,
+  nes: /(^|[\/_\-\s])(ps2|psp|ps1|n64|gba|snes|megadrive|genesis)([\/_\-\s]|$)/i,
+  gba: /(^|[\/_\-\s])(ps2|psp|ps1|n64|snes|nes|nds|3ds)([\/_\-\s]|$)/i,
+  megadrive: /(^|[\/_\-\s])(ps2|psp|ps1|n64|snes|nes|gba)([\/_\-\s]|$)/i,
+  atari2600: /(^|[\/_\-\s])(ps2|psp|ps1|n64|snes|nes|gba)([\/_\-\s]|$)/i,
+};
 
 const CONSOLE_EXT_REGEX: Record<string, RegExp> = {
   atari2600: /\.(a26|bin)$/i,
@@ -62,6 +76,73 @@ function isAllowedProxyTarget(rawUrl: string): URL | null {
     return parsed;
   } catch {
     return null;
+  }
+}
+
+const PS2_CORE_CACHE_DIR = path.join(os.tmpdir(), 'vgfa-ps2-core-cache');
+const ALLOWED_PS2_CORE_FILES: Record<string, string> = {
+  'Play.js': 'application/javascript; charset=utf-8',
+  'Play.wasm': 'application/wasm',
+};
+
+/**
+ * Serve os artefatos BSD-2-Clause do motor PS2 Zero-BIOS (Play.js + Play.wasm)
+ * em mesma origem (com COOP/COEP/CORP) com cache local em disco após o 1º uso.
+ * Isso elimina o bloqueio de iframe cross-origin no Safari/Chrome e permite injetar
+ * o nosso @vgfa/disc (streaming HTTP Range) + Celular DualShock 2 direto no núcleo PS2!
+ */
+async function handlePs2CoreAsset(res: http.ServerResponse, filename: string): Promise<void> {
+  const mime = ALLOWED_PS2_CORE_FILES[filename];
+  if (!mime) {
+    res.writeHead(404, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Arquivo do núcleo PS2 não encontrado.' }));
+    return;
+  }
+
+  const localPath = path.join(PS2_CORE_CACHE_DIR, filename);
+  const headers: Record<string, string> = {
+    'Content-Type': mime,
+    'Cross-Origin-Opener-Policy': 'same-origin',
+    'Cross-Origin-Embedder-Policy': 'require-corp',
+    'Cross-Origin-Resource-Policy': 'cross-origin',
+    'Access-Control-Allow-Origin': '*',
+    'Cache-Control': 'public, max-age=86400',
+  };
+
+  try {
+    const cached = await fs.readFile(localPath);
+    headers['Content-Length'] = String(cached.byteLength);
+    res.writeHead(200, headers);
+    res.end(cached);
+    return;
+  } catch {
+    // Ainda não está em cache; busca uma vez e grava em disco
+  }
+
+  try {
+    const upstream = await fetch(`https://playjs.purei.org/${filename}`, {
+      headers: { 'User-Agent': 'VGFA-PS2Core/0.4' },
+      signal: AbortSignal.timeout(25_000),
+    });
+    if (!upstream.ok) {
+      res.writeHead(upstream.status, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: `Falha ao obter ${filename} (HTTP ${upstream.status})` }));
+      return;
+    }
+    const buf = Buffer.from(await upstream.arrayBuffer());
+    await fs.mkdir(PS2_CORE_CACHE_DIR, { recursive: true });
+    await fs.writeFile(localPath, buf).catch(() => {});
+
+    headers['Content-Length'] = String(buf.byteLength);
+    res.writeHead(200, headers);
+    res.end(buf);
+  } catch (err) {
+    res.writeHead(502, { 'Content-Type': 'application/json' });
+    res.end(
+      JSON.stringify({
+        error: `Erro ao baixar núcleo PS2 ${filename}: ${err instanceof Error ? err.message : String(err)}`,
+      }),
+    );
   }
 }
 
@@ -296,7 +377,10 @@ async function handleArchiveFiles(res: http.ServerResponse, urlObj: URL): Promis
 async function handleArchiveSmartFind(res: http.ServerResponse, urlObj: URL): Promise<void> {
   const q = (urlObj.searchParams.get('q') || '').trim();
   const consoleId = (urlObj.searchParams.get('console') || '').trim().toLowerCase();
+  const serialParam = (urlObj.searchParams.get('serial') || '').trim().toUpperCase();
+  const serialCompact = serialParam.replace(/[^A-Z0-9]/g, '');
   const preferredExt = CONSOLE_EXT_REGEX[consoleId] ?? PLAYABLE_DIRECT_EXT;
+  const excludeOtherPlatform = PLATFORM_EXCLUSION_REGEX[consoleId];
 
   if (!q) {
     res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -357,13 +441,13 @@ async function handleArchiveSmartFind(res: http.ServerResponse, urlObj: URL): Pr
               const isPriv = f.private === true || f.private === 'true';
               if (isPriv) return false;
               if (JUNK_FILE_PATTERN.test(f.name)) return false;
-              // Quando o console foi especificado, exige estritamente extensão daquele console!
+              // Bloqueia arquivos de OUTROS consoles (ex.: nunca devolver PSP/Chains of Olympus quando pediu PS2!)
+              if (excludeOtherPlatform && excludeOtherPlatform.test(f.name)) return false;
               if (consoleId && CONSOLE_EXT_REGEX[consoleId]) {
                 if (!preferredExt.test(f.name)) return false;
               } else if (!PLAYABLE_DIRECT_EXT.test(f.name)) {
                 return false;
               }
-              // Em coleções multi-jogo (mais de 15 arquivos), exige correspondência do nome do jogo no arquivo
               if ((data.files?.length ?? 0) > 15 && queryTokens.length > 0) {
                 const lowerName = f.name.toLowerCase();
                 const hit = queryTokens.some((tok) => lowerName.includes(tok));
@@ -375,13 +459,18 @@ async function handleArchiveSmartFind(res: http.ServerResponse, urlObj: URL): Pr
             .map((f) => {
               const size = Number(f.size ?? 0);
               const lowerName = f.name.toLowerCase();
+              const compactName = f.name.toUpperCase().replace(/[^A-Z0-9]/g, '');
               const tokenHits = queryTokens.filter((tok) => lowerName.includes(tok)).length;
               const matchesConsole = preferredExt.test(f.name);
+              const matchesSerial = serialCompact.length >= 6 && compactName.includes(serialCompact);
+              const isPtBr = /(pt[-_\s]?br|portugu|dublad|legend)/i.test(f.name);
               const rawUrl = `https://archive.org/download/${encodeURIComponent(doc.identifier)}/${encodeURIComponent(f.name)}`;
               const score =
                 (matchesConsole ? 120 : 60) +
+                (matchesSerial ? 180 : 0) +
+                (isPtBr ? 35 : 0) +
                 tokenHits * 40 +
-                (size > 0 && size < 4_700_000_000 ? 15 : 0);
+                (size > 0 && size < 8_600_000_000 ? 15 : 0);
               return {
                 identifier: doc.identifier,
                 itemTitle: doc.title || doc.identifier,
@@ -521,6 +610,12 @@ export function createSignalingServer(port = DEFAULT_PORT) {
           controllerBaseUrl: `http://${primaryLan}:${WEB_PORT}`,
         }),
       );
+      return;
+    }
+
+    if (urlObj.pathname.startsWith('/api/ps2-core/')) {
+      const file = urlObj.pathname.slice('/api/ps2-core/'.length);
+      void handlePs2CoreAsset(res, file);
       return;
     }
 

@@ -1,0 +1,443 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>VGFA PlayStation 2 Runtime</title>
+  <style>
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0;
+      padding: 0;
+      width: 100%;
+      height: 100%;
+      background: #05060a;
+      color: #f8fafc;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+    }
+    #stage {
+      flex: 1;
+      position: relative;
+      display: grid;
+      place-items: center;
+      background: #000;
+      overflow: hidden;
+    }
+    #outputCanvas {
+      width: 100%;
+      height: 100%;
+      max-width: 100%;
+      max-height: 100%;
+      object-fit: contain;
+      background: #000;
+      outline: none;
+    }
+    #overlay {
+      position: absolute;
+      inset: 0;
+      background: rgba(7, 8, 13, 0.9);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 12px;
+      padding: 24px;
+      text-align: center;
+      z-index: 10;
+    }
+    #overlay.hidden { display: none; }
+    .spinner {
+      width: 34px;
+      height: 34px;
+      border-radius: 50%;
+      border: 3px solid rgba(255, 181, 71, 0.25);
+      border-top-color: #ffb547;
+      animation: spin 0.8s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    #hud {
+      flex: 0 0 auto;
+      padding: 7px 14px;
+      background: #0d111a;
+      border-top: 1px solid rgba(148, 163, 184, 0.16);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 10px;
+      font-size: 11px;
+      color: #cbd5e1;
+      flex-wrap: wrap;
+    }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .btn {
+      padding: 9px 16px;
+      border-radius: 10px;
+      border: none;
+      background: linear-gradient(135deg, #ffb547, #ff6b6b);
+      color: #07080d;
+      font-weight: 800;
+      font-size: 13px;
+      cursor: pointer;
+    }
+  </style>
+</head>
+<body>
+  <div id="stage">
+    <canvas id="outputCanvas" width="640" height="480" tabindex="0"></canvas>
+    <div id="overlay">
+      <div class="spinner" id="spinner"></div>
+      <strong id="statusTitle" style="font-size: 16px;">Inicializando núcleo VGFA PlayStation 2...</strong>
+      <div id="statusSub" style="font-size: 12px; color: #94a3b8; max-width: 440px; line-height: 1.5;">
+        Carregando Play.wasm (2,2 MB • Zero BIOS) com streaming VGFA-Disc em blocos de 256 KiB.
+      </div>
+      <label id="manualPickLabel" class="btn" style="display:none;">
+        📂 Escolher ISO / CSO / CHD / ELF Local
+        <input id="manualPick" type="file" accept=".iso,.cso,.chd,.bin,.elf" style="display:none;" />
+      </label>
+    </div>
+  </div>
+  <div id="hud">
+    <span id="hudStatus">Núcleo PS2: iniciando...</span>
+    <span id="hudStats" class="mono">VGFA-Disc: aguardando disco</span>
+  </div>
+
+  <script type="module">
+    const overlay = document.getElementById('overlay');
+    const spinner = document.getElementById('spinner');
+    const statusTitle = document.getElementById('statusTitle');
+    const statusSub = document.getElementById('statusSub');
+    const manualPickLabel = document.getElementById('manualPickLabel');
+    const manualPick = document.getElementById('manualPick');
+    const hudStatus = document.getElementById('hudStatus');
+    const hudStats = document.getElementById('hudStats');
+    const canvas = document.getElementById('outputCanvas');
+
+    function setStatus(title, sub, showSpin = true, showPicker = false) {
+      statusTitle.textContent = title;
+      statusSub.textContent = sub || '';
+      spinner.style.display = showSpin ? 'block' : 'none';
+      manualPickLabel.style.display = showPicker ? 'inline-block' : 'none';
+      overlay.classList.remove('hidden');
+      hudStatus.textContent = title;
+    }
+
+    function hideOverlay(msg) {
+      overlay.classList.add('hidden');
+      hudStatus.textContent = msg || 'PlayStation 2 em execução';
+      canvas.focus();
+    }
+
+    /**
+     * Drive de Disco Virtual VGFA-Disc acoplado diretamente ao Play.wasm!
+     * Suporta arquivo local (File.slice) E streaming remoto (HTTP Range 206 via /api/proxy/stream)
+     * com cache LRU de 48 MiB em chunks de 256 KiB + prefetch sequencial + coalescing!
+     */
+    class VgfaPs2DiscDevice {
+      constructor(module) {
+        this.module = module;
+        this.doneFlag = false;
+        this.mode = null; // 'file' | 'url'
+        this.file = null;
+        this.url = null;
+        this.size = 0;
+        this.chunkSize = 256 * 1024;
+        this.maxCachedChunks = 192; // 48 MiB RAM LRU
+        this.cache = new Map();
+        this.inFlight = new Map();
+        this.bytesDownloaded = 0;
+        this.hits = 0;
+        this.misses = 0;
+        this.lastChunk = -1;
+      }
+
+      setLocalFile(file) {
+        this.mode = 'file';
+        this.file = file;
+        this.size = file.size;
+        this.cache.clear();
+        this.inFlight.clear();
+        this.bytesDownloaded = 0;
+        this.hits = 0;
+        this.misses = 0;
+      }
+
+      async setRemoteUrl(url) {
+        const probe = await globalThis.fetch(url, {
+          headers: { Range: 'bytes=0-0' },
+          cache: 'no-store',
+        });
+        const cr = probe.headers.get('Content-Range') || '';
+        const m = /^bytes\s+0-0\/(\d+)$/.exec(cr.trim());
+        if (probe.status !== 206 || !m) {
+          await probe.body?.cancel().catch(() => {});
+          throw new Error('O servidor remoto não respondeu com HTTP 206 Byte Range para streaming de ISO.');
+        }
+        await probe.arrayBuffer().catch(() => null);
+        this.mode = 'url';
+        this.url = url;
+        this.size = Number(m[1]);
+        this.cache.clear();
+        this.inFlight.clear();
+        this.bytesDownloaded = 0;
+        this.hits = 0;
+        this.misses = 0;
+        return this.size;
+      }
+
+      getFileSize() {
+        return this.size;
+      }
+
+      isDone() {
+        return this.doneFlag;
+      }
+
+      updateHud() {
+        const mb = (this.bytesDownloaded / (1024 * 1024)).toFixed(2);
+        const totalGb = (this.size / (1024 * 1024 * 1024)).toFixed(2);
+        const totalOps = this.hits + this.misses;
+        const hitPct = totalOps > 0 ? Math.round((this.hits / totalOps) * 100) : 0;
+        hudStats.textContent = `VGFA-Disc (${this.mode === 'url' ? 'Streaming' : 'Local'}): ${mb} MB / ${totalGb} GB • Cache ${hitPct}%`;
+      }
+
+      getChunk(index, isPrefetch = false) {
+        const cached = this.cache.get(index);
+        if (cached) {
+          this.cache.delete(index);
+          this.cache.set(index, cached);
+          if (!isPrefetch) this.hits++;
+          return Promise.resolve(cached);
+        }
+        const pending = this.inFlight.get(index);
+        if (pending) return pending;
+
+        const start = index * this.chunkSize;
+        if (start >= this.size) return Promise.resolve(new Uint8Array(0));
+        const end = Math.min(this.size - 1, start + this.chunkSize - 1);
+
+        const p = (async () => {
+          let bytes;
+          if (this.mode === 'file') {
+            const ab = await this.file.slice(start, end + 1).arrayBuffer();
+            bytes = new Uint8Array(ab);
+          } else {
+            const res = await globalThis.fetch(this.url, {
+              headers: { Range: `bytes=${start}-${end}` },
+              cache: 'no-store',
+            });
+            if (res.status !== 206 && res.status !== 200) {
+              throw new Error(`HTTP ${res.status}`);
+            }
+            bytes = new Uint8Array(await res.arrayBuffer());
+          }
+          if (!isPrefetch) this.misses++;
+          this.bytesDownloaded += bytes.byteLength;
+          this.cache.set(index, bytes);
+          if (this.cache.size > this.maxCachedChunks) {
+            const oldest = this.cache.keys().next().value;
+            if (oldest !== undefined) this.cache.delete(oldest);
+          }
+          this.updateHud();
+          return bytes;
+        })().finally(() => {
+          this.inFlight.delete(index);
+        });
+
+        this.inFlight.set(index, p);
+        return p;
+      }
+
+      async readRange(offset, length) {
+        if (offset >= this.size || length <= 0) return new Uint8Array(0);
+        const clamped = Math.min(length, this.size - offset);
+        const out = new Uint8Array(clamped);
+        const first = Math.floor(offset / this.chunkSize);
+        const last = Math.floor((offset + clamped - 1) / this.chunkSize);
+
+        let pos = 0;
+        for (let idx = first; idx <= last; idx++) {
+          const chunk = await this.getChunk(idx, false);
+          const cStart = idx * this.chunkSize;
+          const s = Math.max(0, offset - cStart);
+          const e = Math.min(chunk.byteLength, offset + clamped - cStart);
+          const take = Math.max(0, e - s);
+          if (take > 0) {
+            out.set(chunk.subarray(s, e), pos);
+            pos += take;
+          }
+        }
+
+        // Prefetch sequencial (2 chunks à frente)
+        if (first === this.lastChunk + 1) {
+          void this.getChunk(last + 1, true).catch(() => {});
+          void this.getChunk(last + 2, true).catch(() => {});
+        }
+        this.lastChunk = last;
+        return out;
+      }
+
+      read(dstPtr, offset, length) {
+        this.doneFlag = false;
+        this.readRange(offset, length)
+          .then((bytes) => {
+            this.module.HEAPU8.set(bytes, dstPtr);
+            this.doneFlag = true;
+          })
+          .catch((err) => {
+            console.error('[VGFA-PS2] Erro de leitura:', err);
+            this.doneFlag = true;
+          });
+      }
+    }
+
+    let playModule = null;
+    let discDevice = null;
+    let booted = false;
+    let pendingBoot = null;
+
+    async function initPlayCore() {
+      if (typeof SharedArrayBuffer === 'undefined' || !globalThis.crossOriginIsolated) {
+        setStatus(
+          'SharedArrayBuffer bloqueado no navegador',
+          'Recarregue a página com Cmd+Shift+R para ativar o isolamento COOP/COEP (ou abra no Chrome/Edge).',
+          false,
+          false,
+        );
+        return;
+      }
+
+      try {
+        const mod = await import('/api/ps2-core/Play.js');
+        const PlayFactory = mod.default;
+        const base = window.location.origin + '/api/ps2-core/';
+
+        playModule = await PlayFactory({
+          locateFile: (file) => base + file,
+          mainScriptUrlOrBlob: base + 'Play.js',
+          canvas,
+        });
+
+        try { playModule.FS.mkdir('/work'); } catch {}
+        discDevice = new VgfaPs2DiscDevice(playModule);
+        playModule.discImageDevice = discDevice;
+        playModule.ccall('initVm', '', [], []);
+
+        if (pendingBoot) {
+          const job = pendingBoot;
+          pendingBoot = null;
+          await bootPayload(job);
+        } else {
+          setStatus(
+            'Núcleo PS2 (Zero BIOS) pronto!',
+            'Selecione uma ISO/CSO/CHD/ELF de PlayStation 2 para iniciar agora.',
+            false,
+            true,
+          );
+        }
+      } catch (err) {
+        console.error('[VGFA-PS2] Falha ao iniciar Play.wasm:', err);
+        setStatus(
+          'Erro ao iniciar o núcleo PS2',
+          String(err && err.message ? err.message : err),
+          false,
+          false,
+        );
+      }
+    }
+
+    async function bootPayload(job) {
+      if (!playModule || !discDevice) {
+        pendingBoot = job;
+        return;
+      }
+      if (booted) return;
+
+      try {
+        const name = (job.filename || 'disc.iso').trim();
+        const isElf = name.toLowerCase().endsWith('.elf');
+
+        if (job.file) {
+          setStatus(`Iniciando ${name}...`, 'Montando imagem local no VGFA-Disc (zero cópia para RAM).', true, false);
+          if (isElf) {
+            const bytes = new Uint8Array(await job.file.arrayBuffer());
+            const fd = playModule.FS.open(name, 'w+');
+            playModule.FS.write(fd, bytes, 0, bytes.length, 0);
+            playModule.FS.close(fd);
+            playModule.bootElf(name);
+          } else {
+            discDevice.setLocalFile(job.file);
+            playModule.bootDiscImage(name);
+          }
+          booted = true;
+          hideOverlay(`PS2 rodando: ${name} (Local)`);
+          return;
+        }
+
+        if (job.url) {
+          setStatus(
+            `Conectando streaming de ${name}...`,
+            'Lendo apenas os setores iniciais da ISO via VGFA-Disc HTTP Range (sem baixar gigabytes antes).',
+            true,
+            false,
+          );
+          if (isElf) {
+            const res = await globalThis.fetch(job.url);
+            const bytes = new Uint8Array(await res.arrayBuffer());
+            const fd = playModule.FS.open(name, 'w+');
+            playModule.FS.write(fd, bytes, 0, bytes.length, 0);
+            playModule.FS.close(fd);
+            playModule.bootElf(name);
+          } else {
+            await discDevice.setRemoteUrl(job.url);
+            discDevice.updateHud();
+            playModule.bootDiscImage(name);
+          }
+          booted = true;
+          hideOverlay(`PS2 rodando via Streaming: ${name}`);
+        }
+      } catch (err) {
+        console.error('[VGFA-PS2] Erro no boot:', err);
+        setStatus(
+          'Não foi possível iniciar este disco',
+          String(err && err.message ? err.message : err),
+          false,
+          true,
+        );
+      }
+    }
+
+    manualPick.addEventListener('change', (e) => {
+      const f = e.target.files && e.target.files[0];
+      if (f) void bootPayload({ file: f, filename: f.name });
+    });
+
+    // Recebe comando de boot (ISO local ou URL HTTP Range) e inputs do Celular DualShock 2 via postMessage!
+    window.addEventListener('message', (ev) => {
+      const d = ev.data;
+      if (!d || typeof d !== 'object') return;
+      if (d.type === 'vgfa-ps2-boot') {
+        void bootPayload(d);
+      } else if (d.type === 'vgfa-ps2-key') {
+        const keyEv = new KeyboardEvent(d.down ? 'keydown' : 'keyup', {
+          key: d.key,
+          code: d.code,
+          keyCode: d.keyCode,
+          which: d.keyCode,
+          bubbles: true,
+          cancelable: true,
+        });
+        window.dispatchEvent(keyEv);
+        document.dispatchEvent(keyEv);
+        canvas.dispatchEvent(keyEv);
+      }
+    });
+
+    // Avisa o container pai que o runner está pronto para receber a ISO
+    window.parent.postMessage({ type: 'vgfa-ps2-runner-ready' }, '*');
+    void initPlayCore();
+  </script>
+</body>
+</html>

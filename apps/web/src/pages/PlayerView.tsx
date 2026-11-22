@@ -27,10 +27,12 @@ import { MobileInlinePad } from '../components/MobileInlinePad.js';
 
 function detectMobileDevice(): boolean {
   if (typeof window === 'undefined') return false;
-  // Telas grandes de computador/TV sempre abrem no modo Desktop (QR Code + Bluetooth)
-  if (window.innerWidth >= 1024 && window.innerHeight >= 600) return false;
   const uaMobile = /Android|iPhone|iPod|Mobile/i.test(navigator.userAgent || '');
-  return uaMobile || window.innerWidth <= 820 || window.innerHeight <= 520;
+  if (uaMobile) return true;
+  // Em desktop/Mac (mesmo com janela reduzida), mantém modo Desktop (QR Code + Bluetooth)
+  // e só ativa modo celular automaticamente se houver touch real em tela estreita (<= 560px)
+  const hasTouch = (navigator.maxTouchPoints ?? 0) > 0;
+  return hasTouch && window.innerWidth <= 560;
 }
 
 function getSignalingUrl(): string {
@@ -91,6 +93,7 @@ export const PlayerView: React.FC<Props> = ({ t, session, userId, saveStore, onB
   const [bootError, setBootError] = useState<string | null>(null);
   const [progress, setProgress] = useState<DownloadProgress | null>(null);
   const [ejsSrcDoc, setEjsSrcDoc] = useState<string | null>(null);
+  const [livePhonePad, setLivePhonePad] = useState<PadState | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const [hud, setHud] = useState<{ score: number; lives: number; stage: number; fps: number; extra?: string }>({
     score: 0,
@@ -162,6 +165,7 @@ export const PlayerView: React.FC<Props> = ({ t, session, userId, saveStore, onB
       onRoomCreated: (code) => setRoomCode(code),
       onPadsChanged: (pads) => setRemotePads(pads),
       onPadInput: (state) => {
+        setLivePhonePad(state);
         if (session.mode === 'emulatorjs-rom') {
           keyBridgeRef.current.pushToIframe(state, iframeRef.current);
         }
@@ -733,6 +737,8 @@ export const PlayerView: React.FC<Props> = ({ t, session, userId, saveStore, onB
               expectedSerial={session.serial}
               initialFile={session.localFile}
               initialUrl={session.remoteUrl}
+              romFilename={session.romFilename}
+              externalPadState={livePhonePad}
             />
           ) : (
             <div className="stage-canvas-wrap" style={{ minHeight: 460 }}>
