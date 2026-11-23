@@ -58,6 +58,76 @@ export interface HomeStrings {
   scrollLeft: string;
   scrollRight: string;
   dismiss: string;
+  onDevice: string;
+  ageFree: string;
+  onePlayer: string;
+  playersWord: string;
+  ageRating: string;
+  rankKicker: string;
+  prevSlide: string;
+  nextSlide: string;
+  resumeBtn: string;
+  addList: string;
+  inList: string;
+  myList: string;
+  myListSub: string;
+  topPs1: string;
+  moreOf: string;
+  cardOptions: string;
+  deleteFromDevice: string;
+  deleteConfirmTitle: string;
+  deleteConfirmBody: string;
+  deleteYes: string;
+  cancel: string;
+  close: string;
+  whoPlaying: string;
+  manageProfiles: string;
+  addProfile: string;
+  profileLimit: string;
+  done: string;
+  notNow: string;
+  editProfile: string;
+  createFirstProfile: string;
+  profileName: string;
+  profileNamePh: string;
+  chooseAvatar: string;
+  chooseColor: string;
+  save: string;
+  deleteProfile: string;
+  deleteProfileConfirm: string;
+  myProfile: string;
+  guest: string;
+  profileLocal: string;
+  statsDevice: string;
+  statsTime: string;
+  statsTop: string;
+  statsNone: string;
+  switchProfile: string;
+  profileMenu: string;
+  factDeveloper: string;
+  factPublisher: string;
+  factYear: string;
+  factGenre: string;
+  factPlayers: string;
+  factModes: string;
+  factTime: string;
+  factSize: string;
+  factRating: string;
+  factSeries: string;
+  factConsole: string;
+  highlightsTitle: string;
+  synopsisTitle: string;
+  thisDevice: string;
+  thisDeviceHint: string;
+  moreLike: string;
+  howToPlay: string;
+  how1t: string;
+  how1: string;
+  how2t: string;
+  how2: string;
+  how3t: string;
+  how3: string;
+  tvHint: string;
 }
 
 export const HOME_STRINGS: Record<SupportedLang, HomeStrings> = {
@@ -88,7 +158,7 @@ export const HOME_STRINGS: Record<SupportedLang, HomeStrings> = {
     continueSub: 'Seus jogos baixados neste aparelho',
     freeNow: 'Jogue agora grátis',
     freeNowSub: 'Um clique, sem baixar nada',
-    topPs2: 'Top PS2',
+    topPs2: 'Top 10 PlayStation 2',
     seeAll: 'Ver tudo',
     ready: 'Pronto',
     storeTitle: 'Loja',
@@ -119,6 +189,76 @@ export const HOME_STRINGS: Record<SupportedLang, HomeStrings> = {
     scrollLeft: 'Rolar para a esquerda',
     scrollRight: 'Rolar para a direita',
     dismiss: 'Dispensar',
+    ageFree: 'Livre',
+    onDevice: 'No aparelho',
+    onePlayer: 'jogador',
+    playersWord: 'jogadores',
+    ageRating: 'Classificação',
+    rankKicker: 'Nº {n} no {c}',
+    prevSlide: 'Destaque anterior',
+    nextSlide: 'Próximo destaque',
+    resumeBtn: 'Continuar',
+    addList: 'Minha lista',
+    inList: 'Na minha lista',
+    myList: 'Minha lista',
+    myListSub: 'Os jogos que você guardou neste perfil',
+    topPs1: 'Top 10 PlayStation 1',
+    moreOf: 'Mais do {c}',
+    cardOptions: 'Opções do jogo',
+    deleteFromDevice: 'Apagar do aparelho',
+    deleteConfirmTitle: 'Apagar do aparelho?',
+    deleteConfirmBody: 'Libera {size}. Dá para baixar de novo quando quiser.',
+    deleteYes: 'Sim, apagar',
+    cancel: 'Cancelar',
+    close: 'Fechar',
+    whoPlaying: 'Quem está jogando?',
+    manageProfiles: 'Gerenciar perfis',
+    addProfile: 'Adicionar perfil',
+    profileLimit: 'Limite de 6 perfis',
+    done: 'Concluir',
+    notNow: 'Agora não',
+    editProfile: 'Editar perfil',
+    createFirstProfile: 'Crie seu perfil',
+    profileName: 'Nome',
+    profileNamePh: 'Como devemos te chamar?',
+    chooseAvatar: 'Escolha um avatar',
+    chooseColor: 'Cor',
+    save: 'Salvar',
+    deleteProfile: 'Apagar perfil',
+    deleteProfileConfirm: 'Apagar este perfil e a lista dele?',
+    myProfile: 'Meu perfil',
+    guest: 'Convidado',
+    profileLocal: 'Perfil guardado só neste aparelho',
+    statsDevice: 'Jogos no aparelho',
+    statsTime: 'Tempo de jogo',
+    statsTop: 'Mais jogados',
+    statsNone: 'Ainda sem dados de tempo. Jogue um pouco!',
+    switchProfile: 'Trocar perfil',
+    profileMenu: 'Perfil',
+    factDeveloper: 'Desenvolvedora',
+    factPublisher: 'Publicadora',
+    factYear: 'Ano',
+    factGenre: 'Gênero',
+    factPlayers: 'Jogadores',
+    factModes: 'Modos',
+    factTime: 'Tempo médio',
+    factSize: 'Tamanho',
+    factRating: 'Classificação',
+    factSeries: 'Série',
+    factConsole: 'Console',
+    highlightsTitle: 'Destaques',
+    synopsisTitle: 'Sinopse',
+    thisDevice: 'Neste aparelho',
+    thisDeviceHint: 'Baixe uma vez e jogue offline, sem gastar internet. Dá para apagar quando quiser.',
+    moreLike: 'Mais como este',
+    howToPlay: 'Como jogar',
+    how1t: 'Celular',
+    how1: 'Escaneie o QR Code que aparece ao abrir o jogo e use o celular como controle.',
+    how2t: 'Controle Bluetooth',
+    how2: 'Ligue o controle, pareie no aparelho e aperte qualquer botão.',
+    how3t: 'Teclado',
+    how3: 'Setas para mover, Enter para iniciar e Z, X, A, S como botões (pode variar por console).',
+    tvHint: 'Setas: navegar · OK: abrir · Voltar: fechar',
   },
   en: {
     brandSub: 'Game Hub',
@@ -147,7 +287,7 @@ export const HOME_STRINGS: Record<SupportedLang, HomeStrings> = {
     continueSub: 'Games downloaded on this device',
     freeNow: 'Play free now',
     freeNowSub: 'One click, nothing to download',
-    topPs2: 'Top PS2',
+    topPs2: 'Top 10 PlayStation 2',
     seeAll: 'See all',
     ready: 'Ready',
     storeTitle: 'Store',
@@ -178,6 +318,76 @@ export const HOME_STRINGS: Record<SupportedLang, HomeStrings> = {
     scrollLeft: 'Scroll left',
     scrollRight: 'Scroll right',
     dismiss: 'Dismiss',
+    ageFree: 'All ages',
+    onDevice: 'On device',
+    onePlayer: 'player',
+    playersWord: 'players',
+    ageRating: 'Rated',
+    rankKicker: 'No. {n} on {c}',
+    prevSlide: 'Previous highlight',
+    nextSlide: 'Next highlight',
+    resumeBtn: 'Continue',
+    addList: 'My list',
+    inList: 'In my list',
+    myList: 'My list',
+    myListSub: 'Games you saved on this profile',
+    topPs1: 'Top 10 PlayStation 1',
+    moreOf: 'More from {c}',
+    cardOptions: 'Game options',
+    deleteFromDevice: 'Delete from device',
+    deleteConfirmTitle: 'Delete from device?',
+    deleteConfirmBody: 'Frees {size}. You can download it again anytime.',
+    deleteYes: 'Yes, delete',
+    cancel: 'Cancel',
+    close: 'Close',
+    whoPlaying: 'Who is playing?',
+    manageProfiles: 'Manage profiles',
+    addProfile: 'Add profile',
+    profileLimit: 'Limit of 6 profiles',
+    done: 'Done',
+    notNow: 'Not now',
+    editProfile: 'Edit profile',
+    createFirstProfile: 'Create your profile',
+    profileName: 'Name',
+    profileNamePh: 'What should we call you?',
+    chooseAvatar: 'Pick an avatar',
+    chooseColor: 'Color',
+    save: 'Save',
+    deleteProfile: 'Delete profile',
+    deleteProfileConfirm: 'Delete this profile and its list?',
+    myProfile: 'My profile',
+    guest: 'Guest',
+    profileLocal: 'Profile stored on this device only',
+    statsDevice: 'Games on device',
+    statsTime: 'Play time',
+    statsTop: 'Most played',
+    statsNone: 'No play time yet. Go play a bit!',
+    switchProfile: 'Switch profile',
+    profileMenu: 'Profile',
+    factDeveloper: 'Developer',
+    factPublisher: 'Publisher',
+    factYear: 'Year',
+    factGenre: 'Genre',
+    factPlayers: 'Players',
+    factModes: 'Modes',
+    factTime: 'Average time',
+    factSize: 'Size',
+    factRating: 'Age rating',
+    factSeries: 'Series',
+    factConsole: 'Console',
+    highlightsTitle: 'Highlights',
+    synopsisTitle: 'Synopsis',
+    thisDevice: 'On this device',
+    thisDeviceHint: 'Download once and play offline. You can delete it whenever you like.',
+    moreLike: 'More like this',
+    howToPlay: 'How to play',
+    how1t: 'Phone',
+    how1: 'Scan the QR code shown when the game opens and use your phone as the controller.',
+    how2t: 'Bluetooth controller',
+    how2: 'Turn the controller on, pair it and press any button.',
+    how3t: 'Keyboard',
+    how3: 'Arrows to move, Enter to start and Z, X, A, S as buttons (may vary by console).',
+    tvHint: 'Arrows: move · OK: open · Back: close',
   },
   es: {
     brandSub: 'Central de Juegos',
@@ -206,7 +416,7 @@ export const HOME_STRINGS: Record<SupportedLang, HomeStrings> = {
     continueSub: 'Tus juegos descargados en este dispositivo',
     freeNow: 'Juega gratis ahora',
     freeNowSub: 'Un clic, sin descargar nada',
-    topPs2: 'Top PS2',
+    topPs2: 'Top 10 PlayStation 2',
     seeAll: 'Ver todo',
     ready: 'Listo',
     storeTitle: 'Tienda',
@@ -237,5 +447,75 @@ export const HOME_STRINGS: Record<SupportedLang, HomeStrings> = {
     scrollLeft: 'Desplazar a la izquierda',
     scrollRight: 'Desplazar a la derecha',
     dismiss: 'Descartar',
+    ageFree: 'Libre',
+    onDevice: 'En el dispositivo',
+    onePlayer: 'jugador',
+    playersWord: 'jugadores',
+    ageRating: 'Clasificación',
+    rankKicker: 'N.º {n} en {c}',
+    prevSlide: 'Destacado anterior',
+    nextSlide: 'Siguiente destacado',
+    resumeBtn: 'Continuar',
+    addList: 'Mi lista',
+    inList: 'En mi lista',
+    myList: 'Mi lista',
+    myListSub: 'Los juegos que guardaste en este perfil',
+    topPs1: 'Top 10 PlayStation 1',
+    moreOf: 'Más de {c}',
+    cardOptions: 'Opciones del juego',
+    deleteFromDevice: 'Borrar del dispositivo',
+    deleteConfirmTitle: '¿Borrar del dispositivo?',
+    deleteConfirmBody: 'Libera {size}. Puedes descargarlo de nuevo cuando quieras.',
+    deleteYes: 'Sí, borrar',
+    cancel: 'Cancelar',
+    close: 'Cerrar',
+    whoPlaying: '¿Quién está jugando?',
+    manageProfiles: 'Administrar perfiles',
+    addProfile: 'Agregar perfil',
+    profileLimit: 'Límite de 6 perfiles',
+    done: 'Listo',
+    notNow: 'Ahora no',
+    editProfile: 'Editar perfil',
+    createFirstProfile: 'Crea tu perfil',
+    profileName: 'Nombre',
+    profileNamePh: '¿Cómo te llamamos?',
+    chooseAvatar: 'Elige un avatar',
+    chooseColor: 'Color',
+    save: 'Guardar',
+    deleteProfile: 'Borrar perfil',
+    deleteProfileConfirm: '¿Borrar este perfil y su lista?',
+    myProfile: 'Mi perfil',
+    guest: 'Invitado',
+    profileLocal: 'Perfil guardado solo en este dispositivo',
+    statsDevice: 'Juegos en el dispositivo',
+    statsTime: 'Tiempo de juego',
+    statsTop: 'Más jugados',
+    statsNone: 'Aún sin datos de tiempo. ¡Juega un poco!',
+    switchProfile: 'Cambiar perfil',
+    profileMenu: 'Perfil',
+    factDeveloper: 'Desarrolladora',
+    factPublisher: 'Distribuidora',
+    factYear: 'Año',
+    factGenre: 'Género',
+    factPlayers: 'Jugadores',
+    factModes: 'Modos',
+    factTime: 'Tiempo medio',
+    factSize: 'Tamaño',
+    factRating: 'Clasificación',
+    factSeries: 'Serie',
+    factConsole: 'Consola',
+    highlightsTitle: 'Destacados',
+    synopsisTitle: 'Sinopsis',
+    thisDevice: 'En este dispositivo',
+    thisDeviceHint: 'Descárgalo una vez y juega sin conexión. Puedes borrarlo cuando quieras.',
+    moreLike: 'Más como este',
+    howToPlay: 'Cómo jugar',
+    how1t: 'Celular',
+    how1: 'Escanea el código QR al abrir el juego y usa el celular como control.',
+    how2t: 'Control Bluetooth',
+    how2: 'Enciende el control, empareja y pulsa cualquier botón.',
+    how3t: 'Teclado',
+    how3: 'Flechas para mover, Enter para iniciar y Z, X, A, S como botones (varía según la consola).',
+    tvHint: 'Flechas: mover · OK: abrir · Atrás: cerrar',
   },
 };

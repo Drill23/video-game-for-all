@@ -1,7 +1,9 @@
 import React, { useEffect, useRef, useState } from 'react';
 import type { SupportedLang, UserProfile } from '@vgfa/storage';
 import { Icon } from '../Icon.js';
+import { Avatar } from './Profiles.js';
 import { Tabs, type TabId } from './Tabs.js';
+import type { Profile } from './useProfiles.js';
 import type { HomeStrings } from './strings.js';
 import type { ThemePref } from './useTheme.js';
 
@@ -28,6 +30,9 @@ interface Props {
   onPickFile: (f: File) => void;
   onBrand: () => void;
   padHref: string;
+  profile: Profile | null;
+  onProfileSheet: () => void;
+  onProfileSwitch: () => void;
 }
 
 const ROM_ACCEPT =
@@ -44,8 +49,13 @@ export const TopBar: React.FC<Props> = (p) => {
       if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) setOpen(false);
     };
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setOpen(false);
+      if (e.key === 'Escape' || e.key === 'GoBack') {
+        setOpen(false);
+        wrapRef.current?.querySelector<HTMLElement>('.avatar-btn')?.focus({ preventScroll: true });
+      }
     };
+    // Leva o foco para dentro do menu (navegação por controle)
+    wrapRef.current?.querySelector<HTMLElement>('.menu .menu-item')?.focus({ preventScroll: true });
     document.addEventListener('pointerdown', onDown);
     document.addEventListener('keydown', onKey);
     return () => {
@@ -137,15 +147,45 @@ export const TopBar: React.FC<Props> = (p) => {
             onClick={() => setOpen((v) => !v)}
             aria-label={s.menu}
             aria-expanded={open}
-            style={p.user ? { ['--av' as string]: p.user.avatarColor } : undefined}
+            style={p.user && !p.profile ? { ['--av' as string]: p.user.avatarColor } : undefined}
           >
-            {p.user ? <b>{p.user.username.slice(0, 1).toUpperCase()}</b> : <Icon name="user" size={19} />}
+            {p.profile ? (
+              <Avatar profile={p.profile} size={34} />
+            ) : p.user ? (
+              <b>{p.user.username.slice(0, 1).toUpperCase()}</b>
+            ) : (
+              <Icon name="user" size={19} />
+            )}
           </button>
         </div>
       </header>
 
       {open && (
         <div className="menu glass-strong" role="menu">
+          <div className="menu-profile">
+            <button
+              className="menu-item"
+              onClick={() => {
+                close();
+                p.onProfileSheet();
+              }}
+            >
+              {p.profile ? <Avatar profile={p.profile} size={30} /> : <Icon name="user" size={18} />}
+              <span className="menu-grow">{p.profile?.name ?? s.guest}</span>
+              <small>{s.myProfile}</small>
+            </button>
+            <button
+              className="menu-item"
+              onClick={() => {
+                close();
+                p.onProfileSwitch();
+              }}
+            >
+              <Icon name="users" size={18} />
+              {s.switchProfile}
+            </button>
+          </div>
+
           <div className="menu-user">
             {p.user ? (
               <>
@@ -186,7 +226,16 @@ export const TopBar: React.FC<Props> = (p) => {
 
           <div className="menu-lang">{langSelect('')}</div>
 
-          <label className="menu-item">
+          <label
+            className="menu-item"
+            tabIndex={0}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault();
+                (e.currentTarget.querySelector('input') as HTMLInputElement | null)?.click();
+              }
+            }}
+          >
             <Icon name="folder" size={18} />
             {s.openMyGame}
             <input

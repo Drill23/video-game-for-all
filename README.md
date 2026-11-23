@@ -4,6 +4,16 @@
 
 ---
 
+## Novidades da v0.8 — "Universal"
+
+- **Home estilo central de TV:** destaque em tela cheia com setas ‹ ›, miniaturas e troca automática; Top 10 PS2/PS1 com números grandes; "Continuar jogando" em carrossel com "Apagar do aparelho"; fileiras por gênero e console; ficha completa (desenvolvedora, modos, tempo médio, classificação, destaques, "Mais como este"); navegação por setas para TV/Fire Stick.
+- **Catálogo 4,4× maior:** 233 jogos — 54 de PS1, 112 de PS2 e 39 homebrews grátis jogáveis em 1 clique — todas as capas verificadas.
+- **Perfis "Quem está jogando?"** (até 6, locais) com Minha lista e estatísticas de tempo de jogo.
+- **Controles Bluetooth universais:** perfis 8BitDo (D-input/macOS), Switch, PlayStation e Xbox; direcional por eixo "hat"; P1 = o controle que aperta primeiro (um dispositivo "fantasma" não rouba mais o lugar); funciona também no PS2; tela "Testar / configurar controle" com mapeamento botão a botão salvo por controle; teclas de controle remoto de TV.
+- **Saves automáticos** a cada 60 s, ao sair e ao trocar de app, com "Continuar de onde parou".
+- **Aviso no primeiro download** explicando que o jogo fica neste aparelho e onde apagar; discos de PS2 aparecem na Minha Central com nome, capa e tamanho.
+- **Mais rápido:** a ROM baixa enquanto você conecta o controle; conexão direta do celular em ~3 s (trickle ICE) com latência ao vivo; React e catálogo em arquivos próprios guardados pelo navegador entre atualizações; janelas secundárias sob demanda.
+
 ## Novidades da v0.7 — "Prisma"
 
 - **Visual Liquid Glass "Prisma"** do zero: home com destaque cinematográfico, linhas de cards, abas Início · Loja · Minha Central · Controle, tema escuro/claro, ícone e apresentação novos, modo leve automático em aparelhos fracos.

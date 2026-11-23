@@ -31,6 +31,7 @@ export const ControllerPage: React.FC<Props> = ({ initialRoomCode }) => {
   const [statusText, setStatusText] = useState<string | null>(null);
   const [statusError, setStatusError] = useState<string | null>(null);
   const [rumbleActive, setRumbleActive] = useState(false);
+  const [latencyMs, setLatencyMs] = useState<number | null>(null);
 
   const clientRef = useRef<RemotePadClient | null>(null);
 
@@ -66,6 +67,7 @@ export const ControllerPage: React.FC<Props> = ({ initialRoomCode }) => {
       },
       onTransportChanged: (t) => setTransport(t),
       onStatus: (text) => setStatusText(text),
+      onLatency: (ms) => setLatencyMs(ms),
       onRumble: (cmd) => {
         setRumbleActive(true);
         setTimeout(() => setRumbleActive(false), Math.min(350, cmd.durationMs || 120));
@@ -116,6 +118,7 @@ export const ControllerPage: React.FC<Props> = ({ initialRoomCode }) => {
         onConsolePreviewChange={previewMode ? setConsoleId : undefined}
         onExit={leave}
         notice={previewMode ? null : statusText}
+        latencyMs={previewMode ? null : latencyMs}
       />
     );
   }

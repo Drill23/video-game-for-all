@@ -324,6 +324,20 @@ export function buildEmulatorJsSrcDoc(params: {
     window.EJS_backgroundColor = '#07080D';
     window.EJS_threads = ${needsThreads ? 'true' : 'false'};
     window.EJS_language = 'pt-BR';
+    // Controles Bluetooth/USB são lidos pela página principal (mapeamento universal VGFA, 8BitDo,
+    // DualSense, Xbox, genéricos…) e chegam aqui pela ponte. Esconde os gamepads do EmulatorJS para
+    // não haver leitura dupla (botão "soltando sozinho" quando as duas leituras discordam).
+    try {
+      Object.defineProperty(navigator, 'getGamepads', { configurable: true, value: function () { return []; } });
+    } catch (e) {
+      try { navigator.getGamepads = function () { return []; }; } catch (e2) {}
+    }
+    // O jogo já fica na Minha Central (IndexedDB em pedaços): evita a cópia oculta que o
+    // EmulatorJS faria em "EmulatorJS-roms" a cada sessão (ocupava espaço sem botão de apagar).
+    window.EJS_CacheLimit = 1;
+    window.EJS_onGameStart = function () {
+      try { parent.postMessage({ type: 'vgfa-ejs-started' }, '*'); } catch (e) {}
+    };
     window.EJS_Buttons = {
       playPause: true,
       restart: true,

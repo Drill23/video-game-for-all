@@ -759,3 +759,20 @@
     opacity: 0.3;
   }
 }
+
+/* Linhas fixas: sem gatilhos (NES/GBA/Atari) o deck continua ocupando o espaço todo e centralizado */
+.vp-top {
+  grid-row: 1;
+}
+
+.vp-shoulders {
+  grid-row: 2;
+}
+
+.vp-deck {
+  grid-row: 3;
+}
+
+.vp-rotate-hint {
+  grid-row: 4;
+}

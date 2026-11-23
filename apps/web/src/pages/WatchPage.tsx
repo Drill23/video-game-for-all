@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import {
   BluetoothGamepadAdapter,
-  DEFAULT_KEYBOARD_MAP,
+  keyboardBitFor,
   createEmptyPadState,
   type ConsoleId,
   type PadState,
@@ -66,14 +66,14 @@ export const WatchPage: React.FC<Props> = ({ initialCastCode }) => {
   useEffect(() => {
     if (status !== 'live') return;
     const onDown = (e: KeyboardEvent) => {
-      const bit = DEFAULT_KEYBOARD_MAP[e.code];
+      const bit = keyboardBitFor(e);
       if (!bit) return;
       e.preventDefault();
       kbMaskRef.current |= bit;
       viewerRef.current?.sendPad({ ...createEmptyPadState(0), buttons: kbMaskRef.current });
     };
     const onUp = (e: KeyboardEvent) => {
-      const bit = DEFAULT_KEYBOARD_MAP[e.code];
+      const bit = keyboardBitFor(e);
       if (!bit) return;
       e.preventDefault();
       kbMaskRef.current &= ~bit;

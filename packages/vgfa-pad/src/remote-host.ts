@@ -23,6 +23,9 @@ interface PeerSlot {
   latencyMs?: number;
   /** pareado pelo VGFA Link (sem servidor) */
   link: boolean;
+  /** oferta WebRTC em andamento + candidatos que chegaram antes dela */
+  offerId?: string;
+  pendingIce?: { oid: string; c: RTCIceCandidateInit[] }[];
 }
 
 /** Tempo sem pacotes até soltar os botões daquele jogador (evita botão preso). */
@@ -259,7 +262,29 @@ export class RemotePadHost {
         const peer = this.peers.get(cid);
         if (!peer || !msg.sdp) return;
         peer.lastSeenAt = Date.now();
-        void this.acceptLinkOffer(peer, String(msg.oid || ''), msg.sdp as RTCSessionDescriptionInit);
+        void this.acceptLinkOffer(peer, String(msg.oid || ''), msg.sdp as RTCSessionDescriptionInit, msg.trickle === true);
+        break;
+      }
+      case 'ice': {
+        const peer = this.peers.get(cid);
+        if (!peer || !Array.isArray(msg.c)) return;
+        const oid = String(msg.oid || '');
+        const cands = msg.c as RTCIceCandidateInit[];
+        if (peer.pc && peer.offerId === oid && peer.pc.remoteDescription) {
+          for (const c of cands) void peer.pc.addIceCandidate(c).catch(() => {});
+        } else {
+          // chegou antes da oferta (mensagens podem vir por brokers diferentes)
+          peer.pendingIce = (peer.pendingIce ?? []).filter((x) => x.oid === oid);
+          peer.pendingIce.push({ oid, c: cands });
+        }
+        break;
+      }
+      case 'ping': {
+        const peer = this.peers.get(cid);
+        if (!peer) return;
+        peer.lastSeenAt = Date.now();
+        this.noteLatency(peer, msg.rtt);
+        this.bus?.send({ k: 'pong', t: cid, ts: msg.ts }, false);
         break;
       }
       case 'pad': {
@@ -278,7 +303,20 @@ export class RemotePadHost {
     }
   }
 
-  private async acceptLinkOffer(peer: PeerSlot, offerId: string, sdp: RTCSessionDescriptionInit): Promise<void> {
+  private noteLatency(peer: PeerSlot, rtt: unknown): void {
+    const v = Number(rtt);
+    if (!Number.isFinite(v) || v <= 0) return;
+    const prev = peer.latencyMs ?? 0;
+    peer.latencyMs = Math.round(v);
+    if (Math.abs(prev - v) >= 5) this.emitPads();
+  }
+
+  private async acceptLinkOffer(
+    peer: PeerSlot,
+    offerId: string,
+    sdp: RTCSessionDescriptionInit,
+    trickle = false,
+  ): Promise<void> {
     if (typeof RTCPeerConnection === 'undefined') return;
     // Descarta a conexão antiga desse aparelho (reconexão)
     const oldDc = peer.dc;
@@ -294,6 +332,23 @@ export class RemotePadHost {
 
     const pc = createRtcPeer();
     peer.pc = pc;
+    peer.offerId = offerId;
+    const localIce: RTCIceCandidateInit[] = [];
+    let iceFlush: ReturnType<typeof setTimeout> | null = null;
+    if (trickle) {
+      pc.onicecandidate = (ev) => {
+        if (!ev.candidate || peer.pc !== pc) return;
+        localIce.push(ev.candidate.toJSON());
+        if (!iceFlush) {
+          iceFlush = setTimeout(() => {
+            iceFlush = null;
+            if (this.bus && localIce.length && peer.pc === pc) {
+              this.bus.send({ k: 'ice', t: peer.peerId, oid: offerId, c: localIce.splice(0) });
+            }
+          }, 80);
+        }
+      };
+    }
 
     pc.ondatachannel = (ev) => {
       const dc = ev.channel;
@@ -320,10 +375,14 @@ export class RemotePadHost {
           this.handlePeerPacket(peer, new Uint8Array(m.data));
         } else if (typeof m.data === 'string') {
           try {
-            const j = JSON.parse(m.data) as { type?: string; label?: string };
+            const j = JSON.parse(m.data) as { type?: string; label?: string; ts?: number; rtt?: number };
             if (j.type === 'hello' && j.label) {
               peer.label = String(j.label).slice(0, 40);
               this.emitPads();
+            } else if (j.type === 'ping') {
+              peer.lastSeenAt = Date.now();
+              this.noteLatency(peer, j.rtt);
+              dc.send(JSON.stringify({ type: 'pong', ts: j.ts }));
             }
           } catch {}
         }
@@ -340,9 +399,13 @@ export class RemotePadHost {
 
     try {
       await pc.setRemoteDescription(new RTCSessionDescription(sdp));
+      // candidatos do celular que chegaram antes da oferta
+      const early = (peer.pendingIce ?? []).filter((x) => x.oid === offerId);
+      peer.pendingIce = [];
+      for (const batch of early) for (const c of batch.c) void pc.addIceCandidate(c).catch(() => {});
       const answer = await pc.createAnswer();
       await pc.setLocalDescription(answer);
-      await waitIceComplete(pc, 1500);
+      if (!trickle) await waitIceComplete(pc, 1500);
       if (pc.localDescription && this.bus && peer.pc === pc) {
         this.bus.send({
           k: 'answer',

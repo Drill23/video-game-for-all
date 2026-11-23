@@ -9,6 +9,8 @@
  */
 import { buildProxyStreamUrl, detectVgfaBackend, toArchiveCorsUrl } from './archive-search.js';
 import type { DownloadProgress } from './retro-engine.js';
+import { ALL_STORE_GAMES } from './store-catalog.js';
+import { listUserSources } from './user-sources.js';
 
 export interface LibraryMeta {
   gameId?: string;
@@ -17,11 +19,23 @@ export interface LibraryMeta {
   coverUrl?: string;
 }
 
+/** Pastas do OPFS onde os runners de PS2 guardam discos. NUNCA renomear. */
+export type Ps2OpfsDir = 'vgfa-opfs-discs' | 'vgfa-turbo-discs' | 'vgfa-disc-cache';
+
+export interface Ps2OpfsRef {
+  dir: Ps2OpfsDir;
+  name: string;
+}
+
+/** Como o disco está guardado: inteiro, baixando (incompleto) ou só o que já foi lido (streaming). */
+export type Ps2DiscStorage = 'full' | 'partial' | 'streaming';
+
 export interface LibraryEntry {
-  /** URL normalizada (sem espaços). */
+  /** URL normalizada (sem espaços). Para disco PS2 sem URL: `ps2:<gameId|arquivo>`. */
   key: string;
   url: string;
   filename: string;
+  /** ROM: tamanho gravado no IndexedDB. Disco PS2: tamanho medido no OPFS. */
   sizeBytes: number;
   chunkCount: number;
   savedAt: number;
@@ -31,13 +45,36 @@ export interface LibraryEntry {
   title?: string;
   consoleId?: string;
   coverUrl?: string;
+  /** Ausente = 'rom'. 'ps2-disc' guarda só metadados; o disco em si fica no OPFS. */
+  kind?: 'rom' | 'ps2-disc';
+  /** Só PS2: onde o disco está no OPFS. */
+  opfsRef?: Ps2OpfsRef;
+  /** Só PS2: serial do disco (ex.: SLUS-21678). */
+  serial?: string;
+  /** Só PS2: como o disco está guardado (medido na listagem). */
+  storage?: Ps2DiscStorage;
 }
 
 export interface OpfsDiscInfo {
+  /** `${dir}/${name}` */
   id: string;
-  dir: 'vgfa-opfs-discs' | 'vgfa-disc-cache';
+  dir: Ps2OpfsDir;
   name: string;
   sizeBytes: number;
+  /** Nome amigável pronto para mostrar ("Disco PS2 · nome.iso"). */
+  label: string;
+  storage: Ps2DiscStorage;
+  /** Nome do .iso quando dá para saber (pasta vgfa-turbo-discs). */
+  fileName?: string;
+  /** Nome do volume lido do próprio disco (ISO-9660), quando legível. */
+  volumeId?: string;
+  /** Preenchidos quando o disco foi reconhecido. */
+  gameId?: string;
+  title?: string;
+  url?: string;
+  coverUrl?: string;
+  consoleId?: string;
+  recognizedBy?: 'library' | 'user-source' | 'catalog' | 'file-name' | 'volume-id';
 }
 
 const LIBRARY_DB = 'vgfa_library_v2';
@@ -46,7 +83,30 @@ const CHUNK_STORE = 'chunks';
 const CHUNK_BYTES = 8 * 1024 * 1024;
 const LEGACY_DB = 'vgfa_rom_cache_v1';
 const LEGACY_STORE = 'roms';
-const OPFS_DIRS: Array<OpfsDiscInfo['dir']> = ['vgfa-opfs-discs', 'vgfa-disc-cache'];
+const OPFS_DIRS: Ps2OpfsDir[] = ['vgfa-opfs-discs', 'vgfa-turbo-discs', 'vgfa-disc-cache'];
+/** Evento disparado quando um jogo NOVO começa a ser guardado neste aparelho. */
+export const VGFA_DOWNLOAD_STARTED_EVENT = 'vgfa:download-started';
+
+export interface DownloadStartedInfo {
+  title: string;
+  consoleId?: string;
+  coverUrl?: string;
+  totalBytes?: number;
+  kind: 'rom' | 'ps2-disc';
+}
+
+/**
+ * Avisa a interface (sem acoplar React) que um jogo novo começou a ser guardado.
+ * Quem escuta: `DownloadExplainerHost` (apps/web). Fora do navegador não faz nada.
+ */
+export function emitDownloadStarted(info: DownloadStartedInfo): void {
+  try {
+    if (typeof window === 'undefined' || typeof window.dispatchEvent !== 'function') return;
+    window.dispatchEvent(new CustomEvent<DownloadStartedInfo>(VGFA_DOWNLOAD_STARTED_EVENT, { detail: info }));
+  } catch {
+    // aviso é só cortesia: nunca atrapalha o download
+  }
+}
 
 /** Erro de gravação local (cota, modo privado...). Distingue de falha de rede. */
 export class LibraryStorageError extends Error {
@@ -119,6 +179,7 @@ function getChannel(): BroadcastChannel | null {
     channel = new BroadcastChannel('vgfa-library');
     (channel as unknown as { unref?: () => void }).unref?.();
     channel.onmessage = () => {
+      invalidateOpfsMeasure();
       try {
         localBus?.dispatchEvent(new Event('change'));
       } catch {
@@ -132,6 +193,7 @@ function getChannel(): BroadcastChannel | null {
 }
 
 function emitChange(): void {
+  invalidateOpfsMeasure();
   try {
     localBus?.dispatchEvent(new Event('change'));
   } catch {
@@ -243,19 +305,35 @@ export async function getLibraryEntry(url: string): Promise<LibraryEntry | null>
   try {
     const tx = db.transaction(META_STORE, 'readonly');
     const entry = (await reqP(tx.objectStore(META_STORE).get(normalizeKey(url)))) as LibraryEntry | undefined;
-    return entry && entry.complete ? entry : null;
+    // Disco PS2 não tem pedaços no IndexedDB: nunca devolve como ROM (evita "limpar registro quebrado").
+    return entry && entry.complete && entry.kind !== 'ps2-disc' ? entry : null;
   } catch {
     return null;
   }
 }
 
+/**
+ * Tudo que está guardado neste aparelho: ROMs (IndexedDB) e discos PS2 (OPFS).
+ * Discos PS2 só aparecem se houver algo realmente gravado no OPFS; o `sizeBytes` deles é medido lá.
+ */
 export async function listLibrary(): Promise<LibraryEntry[]> {
   const db = await openLibraryDb();
   if (!db) return [];
   try {
     const tx = db.transaction(META_STORE, 'readonly');
-    const all = (await reqP(tx.objectStore(META_STORE).getAll())) as LibraryEntry[];
-    return all.filter((e) => e && e.complete).sort((a, b) => b.lastPlayedAt - a.lastPlayedAt);
+    const all = ((await reqP(tx.objectStore(META_STORE).getAll())) as LibraryEntry[]).filter((e) => e && e.complete);
+    const roms = all.filter((e) => e.kind !== 'ps2-disc');
+    const ps2Meta = all.filter((e) => e.kind === 'ps2-disc');
+    const ps2: LibraryEntry[] = [];
+    for (const meta of ps2Meta) {
+      try {
+        const found = await resolvePs2Entry(meta);
+        if (found) ps2.push(found);
+      } catch {
+        // disco ilegível agora: não aparece, mas os metadados continuam guardados
+      }
+    }
+    return [...roms, ...ps2].sort((a, b) => b.lastPlayedAt - a.lastPlayedAt);
   } catch {
     return [];
   }
@@ -488,6 +566,17 @@ export async function downloadToLibrary(
     throw storageError ?? new LibraryStorageError('Não foi possível guardar o jogo neste aparelho.');
   }
 
+  // Jogo NOVO sendo guardado neste aparelho (não é leitura do cache): avisa a interface.
+  if (persist) {
+    emitDownloadStarted({
+      title: meta?.title || filename,
+      consoleId: meta?.consoleId,
+      coverUrl: meta?.coverUrl,
+      totalBytes: totalBytes > 0 ? totalBytes : undefined,
+      kind: 'rom',
+    });
+  }
+
   let memBlobs: Blob[] = [];
   let index = 0;
   let loadedBytes = 0;
@@ -634,19 +723,37 @@ export async function markPlayed(url: string, meta?: LibraryMeta): Promise<void>
   }
 }
 
-export async function deleteLibraryEntry(url: string): Promise<void> {
+/**
+ * Apaga um item da biblioteca. Para 'ps2-disc' apaga SÓ o arquivo/pasta daquele disco no OPFS
+ * (e os metadados). Só deve ser chamado depois de a pessoa confirmar na interface.
+ * Devolve false se o disco PS2 não pôde ser removido (em uso): os metadados ficam.
+ */
+export async function removeLibraryEntry(url: string): Promise<boolean> {
   const db = await openLibraryDb();
-  if (!db) return;
+  if (!db) return false;
   try {
     const key = normalizeKey(url);
+    const entry = (await reqP(db.transaction(META_STORE, 'readonly').objectStore(META_STORE).get(key))) as
+      | LibraryEntry
+      | undefined;
+    if (entry?.kind === 'ps2-disc') {
+      const ok = await deletePs2DiscFiles(entry);
+      if (!ok) return false;
+    }
     const tx = db.transaction([META_STORE, CHUNK_STORE], 'readwrite');
     tx.objectStore(META_STORE).delete(key);
     tx.objectStore(CHUNK_STORE).delete(chunkRange(key));
     await txDone(tx);
     emitChange();
+    return true;
   } catch {
-    // ignora
+    return false;
   }
+}
+
+/** Igual a `removeLibraryEntry`, sem devolver nada (assinatura antiga, usada por botões que ignoram o resultado). */
+export async function deleteLibraryEntry(url: string): Promise<void> {
+  await removeLibraryEntry(url);
 }
 
 export async function clearLibrary(): Promise<void> {
@@ -703,10 +810,116 @@ export async function requestPersistentStorage(): Promise<boolean> {
 }
 
 // ==================== Discos PS2 no OPFS ====================
+//
+// Quem grava (arquivos em apps/web/public — só leitura aqui, nada é movido nem renomeado):
+//  - vgfa-opfs-discs/<hash>/   (vgfa-opfs-disc.js, motor "Instantâneo"/Play.wasm)
+//        hash = 8 primeiros bytes do SHA-1 (hex) da `discKey` = a URL EXATA enviada ao runner
+//        (Ps2LabPanel manda buildProxyStreamUrl(url) para http/https). Dentro: full_disc.iso,
+//        full_disc.part ou pedaços N.chk.
+//  - vgfa-turbo-discs/<nome>.iso (+ .part)  (ps2-turbo-runner.html, streamToOpfsFile)
+//  - vgfa-disc-cache/<discId>/   (@vgfa/disc, cache de diagnóstico em pedaços)
 
 type DirHandle = FileSystemDirectoryHandle & {
   entries(): AsyncIterableIterator<[string, FileSystemHandle]>;
 };
+
+/** Mesmo `sanitizeFileName` do ps2-turbo-runner.html. */
+export function sanitizeTurboFileName(name: string, fallback = 'game.iso'): string {
+  const base = String(name || fallback)
+    .replace(/^.*[\\/]/, '')
+    .replace(/[^A-Za-z0-9._ -]+/g, '_')
+    .trim();
+  return base.slice(0, 96) || fallback;
+}
+
+/**
+ * Nome do arquivo gravado em `vgfa-turbo-discs/` a partir do nome limpo (cleanName) do runner:
+ * [^A-Za-z0-9._-] vira '_', corta em 64 caracteres e acrescenta '.iso'
+ * (mesma conta de `streamToOpfsFile` no ps2-turbo-runner.html).
+ */
+export function turboDiscStoreName(cleanName: string): string {
+  return cleanName.replace(/[^A-Za-z0-9._-]+/g, '_').slice(0, 64) + '.iso';
+}
+
+/** Do nome do arquivo do jogo (como o Ps2LabPanel manda) ao nome gravado no OPFS turbo. */
+export function turboDiscNameForFile(fileName: string): string {
+  return turboDiscStoreName(sanitizeTurboFileName(fileName || 'game.iso', 'game.iso'));
+}
+
+/** Nome do arquivo que o Ps2LabPanel manda ao runner quando só há URL. */
+export function ps2FileNameFromUrl(url: string): string {
+  const last = url.split('/').pop()?.split('?')[0] || 'disc.iso';
+  try {
+    return decodeURIComponent(last);
+  } catch {
+    return last;
+  }
+}
+
+/** Fallback FNV-1a de 32 bits usado pelo runner quando não há crypto.subtle. */
+export function opfsDiscHashFallback(s: string): string {
+  let h = 2166136261;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return (h >>> 0).toString(16).padStart(8, '0');
+}
+
+/** Nome da pasta em `vgfa-opfs-discs/` para uma `discKey` (mesma conta de `hashStr` do vgfa-opfs-disc.js). */
+export async function opfsDiscHash(discKey: string): Promise<string> {
+  try {
+    const buf = await crypto.subtle.digest('SHA-1', new TextEncoder().encode(discKey));
+    return Array.from(new Uint8Array(buf).slice(0, 8), (b) => b.toString(16).padStart(2, '0')).join('');
+  } catch {
+    return opfsDiscHashFallback(discKey);
+  }
+}
+
+/**
+ * Todas as `discKey` plausíveis de uma URL (depende do backend estar ou não detectado na hora do jogo).
+ * Usa a URL do jeito que o Ps2LabPanel manda (só com trim) e também sem espaços.
+ */
+export function ps2DiscKeyCandidates(url: string): string[] {
+  const bases = [...new Set([String(url ?? '').trim(), normalizeKey(url)])].filter(Boolean);
+  const out = new Set<string>();
+  const add = (v: string) => {
+    if (v) out.add(v);
+  };
+  for (const clean of bases) {
+    if (/^https?:\/\//i.test(clean)) {
+      try {
+        add(buildProxyStreamUrl(clean));
+      } catch {
+        // ignora
+      }
+      add(`/api/proxy/stream?url=${encodeURIComponent(clean)}`);
+      add(toArchiveCorsUrl(clean));
+    }
+    add(clean);
+  }
+  return [...out];
+}
+
+/** Onde o disco desta URL/arquivo estaria no OPFS (candidatos; pode não existir nenhum). */
+export async function ps2OpfsCandidates(info: { url?: string; fileName?: string }): Promise<Ps2OpfsRef[]> {
+  const refs: Ps2OpfsRef[] = [];
+  const seen = new Set<string>();
+  const push = (ref: Ps2OpfsRef) => {
+    const k = `${ref.dir}/${ref.name}`;
+    if (!seen.has(k)) {
+      seen.add(k);
+      refs.push(ref);
+    }
+  };
+  const url = (info.url ?? '').trim();
+  const fileName = info.fileName || (url ? ps2FileNameFromUrl(url) : '');
+  if (fileName) push({ dir: 'vgfa-turbo-discs', name: turboDiscNameForFile(fileName) });
+  for (const key of ps2DiscKeyCandidates(url)) {
+    push({ dir: 'vgfa-opfs-discs', name: await opfsDiscHash(key) });
+  }
+  return refs;
+}
 
 async function getOpfsRoot(): Promise<DirHandle | null> {
   try {
@@ -717,15 +930,23 @@ async function getOpfsRoot(): Promise<DirHandle | null> {
   }
 }
 
-async function dirSize(handle: DirHandle): Promise<number> {
-  let total = 0;
+interface TreeScan {
+  size: number;
+  /** Nomes dos arquivos no nível de cima. */
+  top: string[];
+}
+
+async function scanTree(handle: DirHandle, topLevel = true): Promise<TreeScan> {
+  let size = 0;
+  const top: string[] = [];
   try {
-    for await (const [, child] of handle.entries()) {
+    for await (const [name, child] of handle.entries()) {
+      if (topLevel) top.push(name);
       try {
         if (child.kind === 'file') {
-          total += (await (child as FileSystemFileHandle).getFile()).size;
+          size += (await (child as FileSystemFileHandle).getFile()).size;
         } else {
-          total += await dirSize(child as DirHandle);
+          size += (await scanTree(child as DirHandle, false)).size;
         }
       } catch {
         // arquivo em uso/ilegível: ignora
@@ -734,44 +955,403 @@ async function dirSize(handle: DirHandle): Promise<number> {
   } catch {
     // ignora
   }
-  return total;
+  return { size, top };
 }
 
+interface Measured {
+  exists: boolean;
+  sizeBytes: number;
+  storage: Ps2DiscStorage;
+}
+
+const MEASURE_TTL_MS = 15_000;
+const measureCache = new Map<string, { at: number; value: Measured }>();
+const measureInflight = new Map<string, Promise<Measured>>();
+
+function invalidateOpfsMeasure(): void {
+  measureCache.clear();
+  measureInflight.clear();
+}
+
+/** Mede o que há gravado em `ref` SEM criar nada (só leitura). */
+async function measureOpfsRef(ref: Ps2OpfsRef, force = false): Promise<Measured> {
+  const id = `${ref.dir}/${ref.name}`;
+  const hit = measureCache.get(id);
+  if (!force && hit && Date.now() - hit.at < MEASURE_TTL_MS) return hit.value;
+  const pending = measureInflight.get(id);
+  if (!force && pending) return pending;
+
+  const job = (async (): Promise<Measured> => {
+    const none: Measured = { exists: false, sizeBytes: 0, storage: 'streaming' };
+    const root = await getOpfsRoot();
+    if (!root) return none;
+    let dirHandle: DirHandle;
+    try {
+      dirHandle = (await root.getDirectoryHandle(ref.dir)) as DirHandle;
+    } catch {
+      return none;
+    }
+    // 1) arquivo (vgfa-turbo-discs)
+    try {
+      const f = await (await dirHandle.getFileHandle(ref.name)).getFile();
+      return { exists: f.size > 0, sizeBytes: f.size, storage: ref.name.endsWith('.part') ? 'partial' : 'full' };
+    } catch {
+      // não é arquivo (ou não existe)
+    }
+    // 2) pasta (vgfa-opfs-discs/<hash>, vgfa-disc-cache/<id>)
+    try {
+      const sub = (await dirHandle.getDirectoryHandle(ref.name)) as DirHandle;
+      const scan = await scanTree(sub);
+      const hasFull = scan.top.includes('full_disc.iso');
+      const hasPart = scan.top.includes('full_disc.part');
+      return {
+        exists: scan.size > 0,
+        sizeBytes: scan.size,
+        storage: hasFull ? 'full' : hasPart ? 'partial' : 'streaming',
+      };
+    } catch {
+      // não existe
+    }
+    // 3) turbo: só sobrou o .part
+    if (ref.dir === 'vgfa-turbo-discs') {
+      try {
+        const f = await (await dirHandle.getFileHandle(`${ref.name}.part`)).getFile();
+        return { exists: f.size > 0, sizeBytes: f.size, storage: 'partial' };
+      } catch {
+        // nada
+      }
+    }
+    return none;
+  })()
+    .then((value) => {
+      measureCache.set(id, { at: Date.now(), value });
+      return value;
+    })
+    .finally(() => {
+      measureInflight.delete(id);
+    });
+  measureInflight.set(id, job);
+  return job;
+}
+
+/** Acha, entre o ref guardado e os candidatos, onde o disco realmente está gravado. */
+async function locatePs2Disc(
+  entry: Pick<LibraryEntry, 'url' | 'filename' | 'opfsRef'>,
+): Promise<{ ref: Ps2OpfsRef; measured: Measured } | null> {
+  const tried = new Set<string>();
+  const refs: Ps2OpfsRef[] = [];
+  if (entry.opfsRef) refs.push(entry.opfsRef);
+  for (const c of await ps2OpfsCandidates({ url: entry.url, fileName: entry.filename })) refs.push(c);
+  let best: { ref: Ps2OpfsRef; measured: Measured } | null = null;
+  for (const ref of refs) {
+    const k = `${ref.dir}/${ref.name}`;
+    if (tried.has(k)) continue;
+    tried.add(k);
+    const measured = await measureOpfsRef(ref);
+    if (measured.exists && (!best || measured.sizeBytes > best.measured.sizeBytes)) best = { ref, measured };
+  }
+  return best;
+}
+
+/** Entrada de disco PS2 com tamanho/local medidos no OPFS, ou null se não há nada gravado. */
+async function resolvePs2Entry(meta: LibraryEntry): Promise<LibraryEntry | null> {
+  const found = await locatePs2Disc(meta);
+  if (!found) return null;
+  return {
+    ...meta,
+    kind: 'ps2-disc',
+    opfsRef: found.ref,
+    sizeBytes: found.measured.sizeBytes,
+    storage: found.measured.storage,
+  };
+}
+
+export interface RegisterPs2DiscInfo {
+  /** URL original do disco (não a do proxy). */
+  url?: string;
+  /** Nome do arquivo como o Ps2LabPanel manda ao runner (romFilename). */
+  fileName?: string;
+  gameId?: string;
+  title: string;
+  coverUrl?: string;
+  serial?: string;
+}
+
+/**
+ * Registra um disco PS2 na "Minha Central" gravando SÓ metadados (o disco em si não é copiado).
+ * O vínculo com o OPFS é calculado igual aos runners e conferido na hora de listar.
+ * `alreadyOnDevice` diz se já havia algo gravado no OPFS para este disco (use para decidir
+ * se mostra o aviso de "primeiro download" com notifyDownloadStarted).
+ */
+export async function registerPs2Disc(
+  info: RegisterPs2DiscInfo,
+): Promise<{ entry: LibraryEntry | null; alreadyOnDevice: boolean }> {
+  const db = await openLibraryDb();
+  if (!db) return { entry: null, alreadyOnDevice: false };
+  // Guarda a URL como o Ps2LabPanel a envia ao runner (só trim): o hash do disco depende dela.
+  const url = (info.url ?? '').trim();
+  const filename = (info.fileName || (url ? ps2FileNameFromUrl(url) : '') || '').trim();
+  const id = info.gameId || filename || info.title;
+  if (!url && !id) return { entry: null, alreadyOnDevice: false };
+  const key = normalizeKey(url) || `ps2:${id}`;
+  try {
+    const found = await locatePs2Disc({ url, filename, opfsRef: undefined });
+    const tx = db.transaction(META_STORE, 'readwrite');
+    const store = tx.objectStore(META_STORE);
+    const prev = (await reqP(store.get(key))) as LibraryEntry | undefined;
+    const now = Date.now();
+    const entry: LibraryEntry = {
+      key,
+      url,
+      filename: filename || prev?.filename || 'disco.iso',
+      sizeBytes: found?.measured.sizeBytes ?? prev?.sizeBytes ?? 0,
+      chunkCount: 0,
+      savedAt: prev?.kind === 'ps2-disc' ? prev.savedAt : now,
+      lastPlayedAt: now,
+      complete: true,
+      kind: 'ps2-disc',
+      consoleId: 'ps2',
+      ...(found ? { opfsRef: found.ref } : prev?.opfsRef ? { opfsRef: prev.opfsRef } : {}),
+      ...cleanMeta({ gameId: info.gameId, title: info.title, coverUrl: info.coverUrl }),
+      ...(info.serial ? { serial: info.serial } : {}),
+    };
+    store.put(entry);
+    await txDone(tx);
+    emitChange();
+    return { entry, alreadyOnDevice: !!found };
+  } catch {
+    return { entry: null, alreadyOnDevice: false };
+  }
+}
+
+/** true se este disco (URL/arquivo) já tem algo gravado no OPFS deste aparelho. */
+export async function isPs2DiscOnDevice(info: { url?: string; fileName?: string }): Promise<boolean> {
+  try {
+    return !!(await locatePs2Disc({ url: (info.url ?? '').trim(), filename: info.fileName ?? '', opfsRef: undefined }));
+  } catch {
+    return false;
+  }
+}
+
+async function removeOpfsEntry(dir: Ps2OpfsDir, name: string): Promise<boolean> {
+  const root = await getOpfsRoot();
+  if (!root) return false;
+  let dirHandle: DirHandle;
+  try {
+    dirHandle = (await root.getDirectoryHandle(dir)) as DirHandle;
+  } catch {
+    return true; // pasta nem existe: nada a apagar
+  }
+  try {
+    await dirHandle.removeEntry(name, { recursive: true });
+    return true;
+  } catch (err) {
+    return (err as { name?: string } | null)?.name === 'NotFoundError';
+  }
+}
+
+/** Apaga o disco ligado a esta entrada (só o arquivo/pasta dela; no turbo, também o .part). */
+async function deletePs2DiscFiles(entry: LibraryEntry): Promise<boolean> {
+  const found = await locatePs2Disc(entry);
+  const ref = found?.ref ?? entry.opfsRef;
+  if (!ref) return true; // nada gravado
+  let ok = await removeOpfsEntry(ref.dir, ref.name);
+  if (ok && ref.dir === 'vgfa-turbo-discs' && !ref.name.endsWith('.part')) {
+    ok = await removeOpfsEntry(ref.dir, `${ref.name}.part`);
+  }
+  invalidateOpfsMeasure();
+  return ok;
+}
+
+/** Lê o nome do volume (ISO-9660, offset 0x8028) — só leitura de 32 bytes. */
+async function peekVolumeId(blob: Blob): Promise<string | undefined> {
+  try {
+    const raw = new Uint8Array(await blob.slice(0x8000, 0x8000 + 72).arrayBuffer());
+    if (raw.length < 72 || raw[0] !== 1 || String.fromCharCode(...raw.slice(1, 6)) !== 'CD001') return undefined;
+    const text = String.fromCharCode(...raw.slice(40, 72)).replace(/[^\x20-\x7e]/g, '').trim();
+    return text || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+async function peekDiscVolumeId(dirHandle: DirHandle, name: string, isDir: boolean): Promise<string | undefined> {
+  try {
+    if (!isDir) {
+      if (name.endsWith('.part')) return undefined;
+      return await peekVolumeId(await (await dirHandle.getFileHandle(name)).getFile());
+    }
+    const sub = await dirHandle.getDirectoryHandle(name);
+    try {
+      return await peekVolumeId(await (await sub.getFileHandle('full_disc.iso')).getFile());
+    } catch {
+      // sem ISO completa: tenta o primeiro pedaço (1 MiB cobre o offset 0x8000)
+      return await peekVolumeId(await (await sub.getFileHandle('0.chk')).getFile());
+    }
+  } catch {
+    return undefined;
+  }
+}
+
+interface Recognized {
+  gameId?: string;
+  title?: string;
+  url?: string;
+  coverUrl?: string;
+  consoleId?: string;
+  fileName?: string;
+  by: NonNullable<OpfsDiscInfo['recognizedBy']>;
+}
+
+/** Mapa `dir/name` → jogo conhecido (biblioteca, fontes do usuário e catálogo). */
+async function buildRecognitionMap(): Promise<Map<string, Recognized>> {
+  const map = new Map<string, Recognized>();
+  const claim = async (
+    src: { url?: string; fileName?: string },
+    info: Omit<Recognized, 'by'>,
+    by: Recognized['by'],
+  ) => {
+    for (const ref of await ps2OpfsCandidates(src)) {
+      const k = `${ref.dir}/${ref.name}`;
+      if (!map.has(k)) map.set(k, { ...info, by });
+    }
+  };
+
+  // 1) metadados da própria biblioteca
+  const db = await openLibraryDb();
+  if (db) {
+    try {
+      const all = (await reqP(db.transaction(META_STORE, 'readonly').objectStore(META_STORE).getAll())) as LibraryEntry[];
+      for (const e of all) {
+        if (!e || e.kind !== 'ps2-disc') continue;
+        if (e.opfsRef) {
+          const k = `${e.opfsRef.dir}/${e.opfsRef.name}`;
+          if (!map.has(k)) {
+            map.set(k, { gameId: e.gameId, title: e.title, url: e.url || undefined, coverUrl: e.coverUrl, consoleId: 'ps2', fileName: e.filename, by: 'library' });
+          }
+        }
+        await claim(
+          { url: e.url, fileName: e.filename },
+          { gameId: e.gameId, title: e.title, url: e.url || undefined, coverUrl: e.coverUrl, consoleId: 'ps2', fileName: e.filename },
+          'library',
+        );
+      }
+    } catch {
+      // ignora
+    }
+  }
+
+  // 2) URLs que a própria pessoa vinculou a jogos
+  try {
+    for (const src of listUserSources()) {
+      const game = ALL_STORE_GAMES.find((g) => g.id === src.gameId);
+      await claim(
+        { url: src.url, fileName: src.filename },
+        { gameId: src.gameId, title: game?.title, url: src.url, coverUrl: game?.coverUrl, consoleId: game?.consoleId, fileName: src.filename },
+        'user-source',
+      );
+    }
+  } catch {
+    // ignora
+  }
+
+  // 3) catálogo com link direto (só PS2)
+  for (const g of ALL_STORE_GAMES) {
+    if (g.consoleId !== 'ps2' || !g.freeRomUrl) continue;
+    await claim(
+      { url: g.freeRomUrl, fileName: g.freeRomFilename },
+      { gameId: g.id, title: g.title, url: g.freeRomUrl, coverUrl: g.coverUrl, consoleId: g.consoleId, fileName: g.freeRomFilename },
+      'catalog',
+    );
+  }
+  return map;
+}
+
+function shortName(name: string): string {
+  return name.length > 14 ? `${name.slice(0, 8)}…${name.slice(-4)}` : name;
+}
+
+/**
+ * Tudo que há de disco PS2 no OPFS (as 3 pastas), com tamanho medido e, quando possível,
+ * o nome do jogo. Só lê: nunca cria, move nem apaga nada.
+ */
 export async function listOpfsDiscs(): Promise<OpfsDiscInfo[]> {
   const root = await getOpfsRoot();
   if (!root) return [];
+  let recognition: Map<string, Recognized> | null = null;
   const out: OpfsDiscInfo[] = [];
   for (const dir of OPFS_DIRS) {
+    let dirHandle: DirHandle;
     try {
-      const dirHandle = (await root.getDirectoryHandle(dir)) as DirHandle;
+      dirHandle = (await root.getDirectoryHandle(dir)) as DirHandle;
+    } catch {
+      continue; // pasta não existe: nada a listar
+    }
+    try {
       for await (const [name, child] of dirHandle.entries()) {
-        let sizeBytes = 0;
-        try {
-          sizeBytes =
-            child.kind === 'file'
-              ? (await (child as FileSystemFileHandle).getFile()).size
-              : await dirSize(child as DirHandle);
-        } catch {
-          // ignora
+        const isDir = child.kind !== 'file';
+        const measured = await measureOpfsRef({ dir, name });
+        const sizeBytes = measured.sizeBytes;
+        let storage: Ps2DiscStorage = measured.storage;
+        if (dir === 'vgfa-turbo-discs' && name.endsWith('.part')) storage = 'partial';
+
+        const info: OpfsDiscInfo = { id: `${dir}/${name}`, dir, name, sizeBytes, storage, label: '' };
+
+        if (dir === 'vgfa-turbo-discs') {
+          // runner grava <nomeLimpo>.iso (+ .part): tira o '.iso'/.part de sufixo
+          const base = name.replace(/\.part$/, '').replace(/\.iso$/, '');
+          info.fileName = base || name;
         }
-        out.push({ id: name, dir, name, sizeBytes });
+
+        if (dir !== 'vgfa-disc-cache') {
+          recognition ??= await buildRecognitionMap();
+          const known = recognition.get(`${dir}/${name.replace(/\.part$/, '')}`) ?? recognition.get(`${dir}/${name}`);
+          if (known) {
+            Object.assign(info, {
+              gameId: known.gameId,
+              title: known.title,
+              url: known.url,
+              coverUrl: known.coverUrl,
+              consoleId: known.consoleId,
+              recognizedBy: known.by,
+            });
+          }
+          if (!info.title && !info.fileName) {
+            const vol = await peekDiscVolumeId(dirHandle, name, isDir);
+            if (vol) {
+              info.volumeId = vol;
+              info.recognizedBy = 'volume-id';
+            }
+          } else if (!info.title && info.fileName) {
+            info.recognizedBy = info.recognizedBy ?? 'file-name';
+          }
+        }
+
+        const sizeText = sizeBytes > 0 ? ` · ${formatBytes(sizeBytes)}` : '';
+        if (dir === 'vgfa-disc-cache') {
+          info.label = `Cache de disco PS2 · ${shortName(name)}`;
+        } else if (info.title) {
+          info.label = `${info.title}${sizeText}`;
+        } else if (info.fileName) {
+          info.label = `Disco PS2 · ${info.fileName}${sizeText}`;
+        } else if (info.volumeId) {
+          info.label = `Disco PS2 · ${info.volumeId}${sizeText}`;
+        } else {
+          info.label = `Disco PS2 instalado · ${shortName(name)}${sizeText}`;
+        }
+        out.push(info);
       }
     } catch {
-      // pasta não existe: nada a listar
+      // ignora esta pasta
     }
   }
   return out;
 }
 
-export async function deleteOpfsDisc(dir: OpfsDiscInfo['dir'], name: string): Promise<boolean> {
-  const root = await getOpfsRoot();
-  if (!root) return false;
-  try {
-    const dirHandle = await root.getDirectoryHandle(dir);
-    await dirHandle.removeEntry(name, { recursive: true });
-    emitChange();
-    return true;
-  } catch {
-    return false;
-  }
+/** Apaga exatamente esta pasta/arquivo do OPFS. Só chamar depois de a pessoa confirmar. */
+export async function deleteOpfsDisc(dir: Ps2OpfsDir, name: string): Promise<boolean> {
+  const ok = await removeOpfsEntry(dir, name);
+  invalidateOpfsMeasure();
+  emitChange();
+  return ok;
 }

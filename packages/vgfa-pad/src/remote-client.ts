@@ -1,6 +1,6 @@
 import { PadStatePump, type PadInput } from './pad-pump.js';
 import { SignalBus, packetToBase64, type BusMessage } from './signal-bus.js';
-import { createRtcPeer, waitIceComplete } from './serverless-rtc.js';
+import { createRtcPeer } from './serverless-rtc.js';
 import type { ConsoleId, RumbleCommand } from './types.js';
 
 export type PadTransport = 'webrtc' | 'ws' | 'relay';
@@ -13,6 +13,8 @@ export interface RemoteClientEvents {
   onDisconnected?: (reason?: string) => void;
   /** Mensagens de progresso para a tela do celular ("Procurando a tela…", "Reconectando…") */
   onStatus?: (text: string) => void;
+  /** Latência ida-e-volta até a tela do jogo (ms) */
+  onLatency?: (ms: number) => void;
 }
 
 function persistentClientId(): string {
@@ -58,6 +60,10 @@ export class RemotePadClient {
   private watchdog: ReturnType<typeof setInterval> | null = null;
   private readonly pump: PadStatePump;
   private readonly onVisibility = () => this.handleVisibility();
+  private pingTimer: ReturnType<typeof setInterval> | null = null;
+  private lastRtt = 0;
+  private pendingRemoteIce: RTCIceCandidateInit[] = [];
+  private remoteDescSet = false;
 
   constructor(
     private readonly signalingUrl: string,
@@ -174,6 +180,30 @@ export class RemotePadClient {
     bus.start();
     this.startJoinLoop();
     this.watchdog = setInterval(() => this.checkHostAlive(), 2000);
+    this.pingTimer = setInterval(() => this.sendPing(), 2000);
+  }
+
+  /** Mede a latência: pelo canal direto a cada 2 s, pelo relé a cada 4 s. */
+  private pingTick = 0;
+  private sendPing(): void {
+    if (this.disposed || !this.welcomed) return;
+    this.pingTick++;
+    const ts = Date.now();
+    if (this.dc?.readyState === 'open') {
+      try {
+        this.dc.send(JSON.stringify({ type: 'ping', ts, rtt: this.lastRtt }));
+      } catch {}
+    } else if (this.bus && this.hostId && this.pingTick % 2 === 0) {
+      this.bus.send({ k: 'ping', t: this.hostId, ts, rtt: this.lastRtt }, false);
+    }
+  }
+
+  private handlePong(ts: unknown): void {
+    const sent = Number(ts);
+    if (!Number.isFinite(sent)) return;
+    const rtt = Math.max(1, Date.now() - sent);
+    this.lastRtt = this.lastRtt ? Math.round(this.lastRtt * 0.6 + rtt * 0.4) : rtt;
+    this.events.onLatency?.(this.lastRtt);
   }
 
   private startJoinLoop(): void {
@@ -245,10 +275,32 @@ export class RemotePadClient {
         break;
       }
       case 'answer': {
-        if (!this.pc || msg.oid !== this.currentOfferId) return;
-        void this.pc
+        if (!this.pc || msg.oid !== this.currentOfferId || this.remoteDescSet) return;
+        const pc = this.pc;
+        this.remoteDescSet = true;
+        void pc
           .setRemoteDescription(new RTCSessionDescription(msg.sdp as RTCSessionDescriptionInit))
-          .catch(() => {});
+          .then(() => {
+            const queued = this.pendingRemoteIce.splice(0);
+            for (const c of queued) void pc.addIceCandidate(c).catch(() => {});
+          })
+          .catch(() => {
+            this.remoteDescSet = false;
+          });
+        break;
+      }
+      case 'ice': {
+        if (!this.pc || msg.oid !== this.currentOfferId || !Array.isArray(msg.c)) return;
+        const cands = msg.c as RTCIceCandidateInit[];
+        if (this.remoteDescSet && this.pc.remoteDescription) {
+          for (const c of cands) void this.pc.addIceCandidate(c).catch(() => {});
+        } else {
+          this.pendingRemoteIce.push(...cands);
+        }
+        break;
+      }
+      case 'pong': {
+        this.handlePong(msg.ts);
         break;
       }
       case 'console': {
@@ -285,6 +337,23 @@ export class RemotePadClient {
     this.dc = dc;
     const offerId = `o${Math.random().toString(36).slice(2, 10)}`;
     this.currentOfferId = offerId;
+    this.pendingRemoteIce = [];
+    this.remoteDescSet = false;
+    // Trickle ICE: manda a oferta na hora e as rotas (candidatos) conforme forem descobertas
+    const localIce: RTCIceCandidateInit[] = [];
+    let iceFlush: ReturnType<typeof setTimeout> | null = null;
+    pc.onicecandidate = (ev) => {
+      if (!ev.candidate || this.pc !== pc) return;
+      localIce.push(ev.candidate.toJSON());
+      if (!iceFlush) {
+        iceFlush = setTimeout(() => {
+          iceFlush = null;
+          if (this.bus && this.hostId && localIce.length && this.pc === pc) {
+            this.bus.send({ k: 'ice', t: this.hostId, oid: offerId, c: localIce.splice(0) });
+          }
+        }, 80);
+      }
+    };
 
     dc.onopen = () => {
       if (this.dc !== dc) return;
@@ -303,6 +372,8 @@ export class RemotePadClient {
           this.events.onConsoleChanged?.(payload.consoleId, payload.gameTitle || 'VGFA');
         } else if (payload.type === 'rumble') {
           this.triggerHaptics(payload);
+        } else if (payload.type === 'pong') {
+          this.handlePong(payload.ts);
         } else if (payload.type === 'welcome' && payload.slot !== undefined) {
           this.slot = Number(payload.slot) & 0x0f;
           this.pump.setSlot(this.slot);
@@ -325,12 +396,12 @@ export class RemotePadClient {
     try {
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
-      await waitIceComplete(pc, 1500);
       if (this.disposed || this.pc !== pc || !pc.localDescription || !this.hostId) return;
       this.bus.send({
         k: 'offer',
         t: this.hostId,
         oid: offerId,
+        trickle: true,
         sdp: { type: pc.localDescription.type, sdp: pc.localDescription.sdp },
       });
       // Se o WebRTC direto não abrir, segue pelo relé e tenta de novo mais tarde
@@ -498,6 +569,7 @@ export class RemotePadClient {
     if (this.joinTimer) clearInterval(this.joinTimer);
     if (this.rtcRetryTimer) clearTimeout(this.rtcRetryTimer);
     if (this.watchdog) clearInterval(this.watchdog);
+    if (this.pingTimer) clearInterval(this.pingTimer);
     if (this.bus && this.hostId) this.bus.send({ k: 'bye', t: this.hostId }, false);
     const bus = this.bus;
     this.bus = null;

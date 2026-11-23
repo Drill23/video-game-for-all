@@ -3,9 +3,9 @@ import QRCode from 'qrcode';
 import {
   BluetoothGamepadAdapter,
   CONTROLLER_PROFILES,
-  DEFAULT_KEYBOARD_MAP,
   RemotePadHost,
   createEmptyPadState,
+  keyboardBitFor,
   type ConnectedPadInfo,
   type ConsoleId,
   type PadState,
@@ -16,6 +16,7 @@ import {
   VgfaBuiltinArcadeEngine,
   buildEmulatorJsSrcDoc,
   fetchRomAsFile,
+  registerPs2Disc,
   type BuiltinVariant,
   type DownloadProgress,
 } from '@vgfa/runtime';
@@ -27,6 +28,17 @@ import { padKindLabel } from '../components/padKind.js';
 import { Ps2LabPanel } from '../components/Ps2LabPanel.js';
 import { QrConnectModal } from '../components/QrConnectModal.js';
 import { MobileInlinePad } from '../components/MobileInlinePad.js';
+import { ControllerSetupModal } from '../components/ControllerSetupModal.js';
+import { ResumePrompt } from '../components/ResumePrompt.js';
+import { notifyDownloadStarted } from '../components/DownloadExplainer.js';
+import {
+  attachEjsAutosave,
+  getLatestSave,
+  loadSaveInto,
+  recordPlayTime,
+  type EjsAutosaveHandle,
+  type EjsSave,
+} from '../services/ejs-saves.js';
 import { VgfaCastHost } from '../services/vgfa-cast.js';
 import '../styles/player.css';
 
@@ -120,6 +132,13 @@ export const PlayerView: React.FC<Props> = ({ t, session, userId, saveStore, onB
   const [btPads, setBtPads] = useState<ConnectedPadInfo[]>([]);
   const [showQrModal, setShowQrModal] = useState(false);
   const [showAdvanced, setShowAdvanced] = useState(false);
+  const [showPadSetup, setShowPadSetup] = useState(false);
+  // Download antecipado: a ROM baixa enquanto a pessoa conecta o controle
+  const [romPrep, setRomPrep] = useState<{ percent: number; done: boolean; fromCache?: boolean; error?: string } | null>(null);
+  const romPromiseRef = useRef<Promise<File> | null>(null);
+  const romAbortRef = useRef<AbortController | null>(null);
+  const startedRef = useRef(false);
+  startedRef.current = started;
 
   // VGFA-Cast (Cloud Gaming P2P 60 FPS para amigos via link)
   const [showCastModal, setShowCastModal] = useState(false);
@@ -154,16 +173,26 @@ export const PlayerView: React.FC<Props> = ({ t, session, userId, saveStore, onB
    * P1 = celular P1 + controle de toque desta tela + amigo do VGFA-Cast; P2..P4 = demais celulares.
    */
   const pumpEjsInput = useCallback(() => {
-    if (session.mode !== 'emulatorjs-rom') return;
+    const isEjs = session.mode === 'emulatorjs-rom';
+    const isPs2 = session.mode === 'ps2-webgpu-lab';
+    if (!isEjs && !isPs2) return;
     const host = hostRef.current;
+    // Controles Bluetooth/USB (8BitDo, Xbox, DualSense…): P1 = o primeiro que apertou um botão
+    const bt = btAdapterRef.current.pollAll();
     const states: Array<PadState | null> = [null, null, null, null];
-    for (let s = 0; s < 4; s++) states[s] = host?.getLatestState(s) ?? null;
+    for (let s = 0; s < 4; s++) states[s] = mergePadStates(host?.getLatestState(s) ?? null, bt.get(s) ?? null);
     let p1 = mergePadStates(states[0], inlinePadStateRef.current);
+    if (keyboardMaskRef.current) {
+      const kb = createEmptyPadState(0);
+      kb.buttons = keyboardMaskRef.current;
+      p1 = mergePadStates(p1, kb);
+    }
     if (castPadStateRef.current && Date.now() - castPadAtRef.current < 2500) {
       p1 = mergePadStates(p1, castPadStateRef.current);
     }
     states[0] = p1;
-    ejsBridgeRef.current?.sync(states, iframeRef.current);
+    if (isEjs) ejsBridgeRef.current?.sync(states, iframeRef.current);
+    else publishLivePadRef.current(p1 ?? createEmptyPadState(0));
   }, [session.mode]);
   const pumpEjsInputRef = useRef(pumpEjsInput);
   pumpEjsInputRef.current = pumpEjsInput;
@@ -194,7 +223,6 @@ export const PlayerView: React.FC<Props> = ({ t, session, userId, saveStore, onB
   const handleInlineMobilePad = useCallback(
     (state: PadState) => {
       inlinePadStateRef.current = state;
-      publishLivePadRef.current(state);
       pumpEjsInputRef.current();
     },
     [],
@@ -269,7 +297,6 @@ export const PlayerView: React.FC<Props> = ({ t, session, userId, saveStore, onB
       onPadInput: (state) => {
         castPadStateRef.current = state;
         castPadAtRef.current = Date.now();
-        publishLivePadRef.current(state);
         pumpEjsInputRef.current();
       },
       onError: (msg) => setCastError(msg),
@@ -323,7 +350,6 @@ export const PlayerView: React.FC<Props> = ({ t, session, userId, saveStore, onB
       onRoomCreated: (code) => setRoomCode(code),
       onPadsChanged: (pads) => setRemotePads(pads),
       onPadInput: (state) => {
-        if (state.slot === 0) publishLivePadRef.current(state);
         pumpEjsInputRef.current();
       },
     });
@@ -373,19 +399,32 @@ export const PlayerView: React.FC<Props> = ({ t, session, userId, saveStore, onB
 
   // Monitor de controles Bluetooth + Teclado
   useEffect(() => {
+    const isTyping = (e: KeyboardEvent) => {
+      const t = e.target as HTMLElement | null;
+      return !!t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable);
+    };
     const onKeyDown = (e: KeyboardEvent) => {
-      const bit = DEFAULT_KEYBOARD_MAP[e.code];
+      if (isTyping(e)) return;
+      const bit = keyboardBitFor(e);
       if (!bit) return;
-      if (session.mode === 'builtin-arcade' && started) e.preventDefault();
+      // Em jogo, as setas/espaço não rolam a página
+      if (started) e.preventDefault();
       keyboardMaskRef.current |= bit;
+      pumpEjsInputRef.current();
     };
     const onKeyUp = (e: KeyboardEvent) => {
-      const bit = DEFAULT_KEYBOARD_MAP[e.code];
+      const bit = keyboardBitFor(e);
       if (!bit) return;
       keyboardMaskRef.current &= ~bit;
+      pumpEjsInputRef.current();
+    };
+    // O foco foi para dentro do jogo (iframe) ou para outro app: solta as teclas
+    const onBlur = () => {
+      keyboardMaskRef.current = 0;
     };
     window.addEventListener('keydown', onKeyDown);
     window.addEventListener('keyup', onKeyUp);
+    window.addEventListener('blur', onBlur);
 
     let lastBtKey = '';
     const timer = setInterval(() => {
@@ -400,19 +439,81 @@ export const PlayerView: React.FC<Props> = ({ t, session, userId, saveStore, onB
     return () => {
       window.removeEventListener('keydown', onKeyDown);
       window.removeEventListener('keyup', onKeyUp);
+      window.removeEventListener('blur', onBlur);
       clearInterval(timer);
     };
   }, [session.mode, started]);
 
-  // Bomba de entrada do EmulatorJS: 60x/s envia o estado de todos os jogadores (só posta quando muda)
+  // Bomba de entrada: 60x/s junta celular + Bluetooth + teclado + toque e envia ao motor (só posta quando muda)
   useEffect(() => {
-    if (!started || session.mode !== 'emulatorjs-rom') return;
+    const active = session.mode === 'ps2-webgpu-lab' || (started && session.mode === 'emulatorjs-rom');
+    if (!active) return;
     const timer = setInterval(() => pumpEjsInputRef.current(), 16);
     return () => {
       clearInterval(timer);
       ejsBridgeRef.current?.releaseAll(iframeRef.current);
     };
   }, [started, session.mode]);
+
+  /** Baixa (ou lê do aparelho) a ROM uma única vez, compartilhado entre a tela pré-jogo e o motor. */
+  const ensureRom = useCallback((): Promise<File> => {
+    if (session.localFile) return Promise.resolve(session.localFile);
+    if (romPromiseRef.current) return romPromiseRef.current;
+    if (!session.remoteUrl) return Promise.reject(new Error('Jogo sem endereço.'));
+    const controller = new AbortController();
+    romAbortRef.current = controller;
+    const name =
+      session.romFilename ||
+      decodeURIComponent(
+        session.remoteUrl.split('/').pop()?.split('?')[0] || `game${consoleDef.extensions[0] || '.rom'}`,
+      );
+    setRomPrep({ percent: 0, done: false });
+    const promise = fetchRomAsFile(
+      session.remoteUrl,
+      name,
+      (p) => {
+        setRomPrep({ percent: p.percent, done: p.percent >= 100, fromCache: p.fromCache });
+        if (startedRef.current) {
+          setProgress(p);
+          if (p.fromCache) setBootStatus('Carregado do aparelho! Iniciando...');
+        }
+      },
+      controller.signal,
+      {
+        gameId: session.id,
+        title: session.title,
+        consoleId: session.consoleId,
+        coverUrl: session.coverUrl,
+      },
+    ).then(
+      (file) => {
+        setRomPrep({ percent: 100, done: true });
+        return file;
+      },
+      (err: unknown) => {
+        romPromiseRef.current = null; // permite tentar de novo
+        setRomPrep({
+          percent: 0,
+          done: false,
+          error: err instanceof Error ? err.message : 'Falha ao preparar o jogo.',
+        });
+        throw err;
+      },
+    );
+    romPromiseRef.current = promise;
+    return promise;
+  }, [session, consoleDef]);
+
+  // Começa a preparar o jogo assim que a tela pré-jogo abre (o clique em "Jogar" fica instantâneo)
+  useEffect(() => {
+    if (session.mode !== 'emulatorjs-rom' || !session.remoteUrl || session.localFile) return;
+    void ensureRom().catch(() => {});
+    return () => {
+      romAbortRef.current?.abort();
+      romAbortRef.current = null;
+      romPromiseRef.current = null;
+    };
+  }, [session.mode, session.remoteUrl, session.localFile, ensureRom]);
 
   // 2. Só inicia o motor de jogo APÓS o clique em "INICIAR JOGO AGORA" (desbloqueia áudio no Safari/Chrome!)
   useEffect(() => {
@@ -453,7 +554,6 @@ export const PlayerView: React.FC<Props> = ({ t, session, userId, saveStore, onB
     if (session.mode === 'emulatorjs-rom' && (session.localFile || session.remoteUrl)) {
       let cancelled = false;
       let objectUrl: string | null = null;
-      const controller = new AbortController();
 
       const bootEmulator = async () => {
         try {
@@ -463,29 +563,7 @@ export const PlayerView: React.FC<Props> = ({ t, session, userId, saveStore, onB
             romFile = session.localFile;
           } else {
             setBootStatus(`Preparando ${session.title}...`);
-            const name =
-              session.romFilename ||
-              decodeURIComponent(
-                session.remoteUrl!.split('/').pop()?.split('?')[0] ||
-                  `game${consoleDef.extensions[0] || '.rom'}`,
-              );
-            romFile = await fetchRomAsFile(
-              session.remoteUrl!,
-              name,
-              (p) => {
-                if (!cancelled) {
-                  setProgress(p);
-                  if (p.fromCache) setBootStatus('Carregado do cache rápido! Iniciando...');
-                }
-              },
-              controller.signal,
-              {
-                gameId: session.id,
-                title: session.title,
-                consoleId: session.consoleId,
-                coverUrl: session.coverUrl,
-              },
-            );
+            romFile = await ensureRom();
           }
 
           if (cancelled) return;
@@ -515,11 +593,93 @@ export const PlayerView: React.FC<Props> = ({ t, session, userId, saveStore, onB
       void bootEmulator();
       return () => {
         cancelled = true;
-        controller.abort();
         if (objectUrl) URL.revokeObjectURL(objectUrl);
       };
     }
-  }, [started, session, consoleDef, readMergedInput]);
+  }, [started, session, consoleDef, readMergedInput, ensureRom]);
+
+  // Saves automáticos + "Continuar de onde parou" (EmulatorJS)
+  const autosaveRef = useRef<EjsAutosaveHandle | null>(null);
+  const [resumeSave, setResumeSave] = useState<EjsSave | null>(null);
+  useEffect(() => {
+    if (session.mode !== 'emulatorjs-rom' || !ejsSrcDoc) return;
+    let alive = true;
+    const iframe = iframeRef.current;
+    if (iframe) {
+      autosaveRef.current = attachEjsAutosave(iframe, {
+        gameKey: session.id,
+        title: session.title,
+        consoleId: session.consoleId,
+        coverUrl: session.coverUrl,
+      });
+    }
+    void getLatestSave(session.id)
+      .then((save) => {
+        if (alive && save) setResumeSave(save);
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+      const handle = autosaveRef.current;
+      autosaveRef.current = null;
+      void handle?.dispose();
+      setResumeSave(null);
+    };
+  }, [ejsSrcDoc, session.mode, session.id, session.title, session.consoleId, session.coverUrl]);
+
+  // PS2: registra o disco na Minha Central (reabre sem baixar) e conta o tempo de jogo
+  useEffect(() => {
+    if (session.mode !== 'ps2-webgpu-lab') return;
+    const startedAt = Date.now();
+    if (session.remoteUrl) {
+      void registerPs2Disc({
+        url: session.remoteUrl,
+        fileName: session.romFilename,
+        gameId: session.id,
+        title: session.title,
+        coverUrl: session.coverUrl,
+        serial: session.serial,
+      })
+        .then(({ alreadyOnDevice }) => {
+          if (!alreadyOnDevice) {
+            notifyDownloadStarted({ kind: 'ps2-disc', title: session.title, consoleId: 'ps2', coverUrl: session.coverUrl });
+          }
+        })
+        .catch(() => {});
+    }
+    return () => {
+      const ms = Date.now() - startedAt;
+      if (ms > 15_000) {
+        void recordPlayTime(session.id, ms, { title: session.title, consoleId: session.consoleId, coverUrl: session.coverUrl });
+      }
+    };
+  }, [session.mode, session.remoteUrl, session.romFilename, session.id, session.title, session.coverUrl, session.serial, session.consoleId]);
+
+  /** Voltar: salva o progresso antes de sair (no máximo 1,5 s de espera). */
+  const handleBack = async () => {
+    try {
+      await Promise.race([
+        autosaveRef.current?.saveNow('back') ?? Promise.resolve(false),
+        new Promise((r) => setTimeout(r, 1500)),
+      ]);
+    } catch {
+      // segue saindo
+    }
+    onBack();
+  };
+
+  const resumeOverlay = resumeSave ? (
+    <ResumePrompt
+      title={session.title}
+      savedAt={resumeSave.savedAt}
+      onResume={() => {
+        const save = resumeSave;
+        setResumeSave(null);
+        if (save && iframeRef.current) void loadSaveInto(iframeRef.current, save);
+      }}
+      onFresh={() => setResumeSave(null)}
+    />
+  ) : null;
 
   const handleSaveBuiltin = async () => {
     if (!builtinRef.current) return;
@@ -560,7 +720,7 @@ export const PlayerView: React.FC<Props> = ({ t, session, userId, saveStore, onB
 
         <div className="vgfa-shell pg-shell">
           <div className="pg-top">
-            <button className="btn btn-sm" onClick={onBack}>
+            <button className="btn btn-sm" onClick={() => void handleBack()}>
               <Icon name="chevL" size={16} /> Voltar à Loja
             </button>
             <button
@@ -687,6 +847,7 @@ export const PlayerView: React.FC<Props> = ({ t, session, userId, saveStore, onB
                             <i className="pulse-dot" />
                             <span>
                               ✓ {p.label} conectado · P{p.slot + 1} · {padKindLabel(p.kind)}
+                              {p.latencyMs ? ` · ${p.latencyMs} ms` : ''}
                             </span>
                           </div>
                         ))}
@@ -717,7 +878,9 @@ export const PlayerView: React.FC<Props> = ({ t, session, userId, saveStore, onB
                     {btPads.length > 0 ? (
                       <div className="pg-status is-ok">
                         <i className="pulse-dot" />
-                        <span>✓ Controle detectado: {btPads[0].label}</span>
+                        <span>
+                          ✓ {btPads.map((p) => `${p.label} (P${p.slot + 1})`).join(' · ')}
+                        </span>
                       </div>
                     ) : (
                       <div className="pg-status">
@@ -725,6 +888,9 @@ export const PlayerView: React.FC<Props> = ({ t, session, userId, saveStore, onB
                         <span>Aperte qualquer botão no controle para conectar…</span>
                       </div>
                     )}
+                    <button className="btn btn-sm btn-ghost" style={{ marginTop: 10 }} onClick={() => setShowPadSetup(true)}>
+                      🎮 Testar / configurar controle
+                    </button>
                   </div>
 
                   <div className="pg-keys">
@@ -733,10 +899,31 @@ export const PlayerView: React.FC<Props> = ({ t, session, userId, saveStore, onB
                 </div>
               )}
 
+              {showPadSetup && (
+                <ControllerSetupModal
+                  adapter={btAdapterRef.current}
+                  consoleId={session.consoleId}
+                  onClose={() => setShowPadSetup(false)}
+                />
+              )}
               {/* Botão Principal de Iniciar */}
               <button className="btn btn-primary btn-lg pg-cta" onClick={() => setStarted(true)}>
                 <Icon name="play" size={18} /> {hasAnyController ? 'Jogar com controle' : 'Jogar agora'}
               </button>
+              {romPrep && (
+                <div className={`pg-prep ${romPrep.done ? 'is-ready' : ''} ${romPrep.error ? 'is-error' : ''}`}>
+                  {romPrep.error ? (
+                    <span>⚠️ {romPrep.error} — tente “Jogar” para tentar de novo.</span>
+                  ) : romPrep.done ? (
+                    <span>⚡ Jogo pronto neste aparelho — abre na hora.</span>
+                  ) : (
+                    <>
+                      <span>Preparando o jogo enquanto você conecta o controle… {romPrep.percent}%</span>
+                      <i style={{ width: `${Math.max(4, romPrep.percent)}%` }} />
+                    </>
+                  )}
+                </div>
+              )}
             </div>
           </div>
         </div>
@@ -749,7 +936,7 @@ export const PlayerView: React.FC<Props> = ({ t, session, userId, saveStore, onB
     return (
       <div className="mobile-player-shell">
         <div className="mobile-stage-bar">
-          <button className="btn btn-sm" onClick={onBack}>
+          <button className="btn btn-sm" onClick={() => void handleBack()}>
             ← Sair
           </button>
           <strong className="mobile-title">{session.title}</strong>
@@ -789,6 +976,8 @@ export const PlayerView: React.FC<Props> = ({ t, session, userId, saveStore, onB
             <canvas ref={canvasRef} style={{ width: '100%', height: '100%', objectFit: 'contain' }} />
           )}
 
+          {resumeOverlay}
+
           {bootStatus && (
             <div className="boot-overlay">
               <div className="glass-spinner" />
@@ -806,7 +995,7 @@ export const PlayerView: React.FC<Props> = ({ t, session, userId, saveStore, onB
               <div className="boot-error">
                 <strong>Não foi possível iniciar</strong>
                 <span>{bootError}</span>
-                <button className="btn btn-sm btn-primary" onClick={onBack}>
+                <button className="btn btn-sm btn-primary" onClick={() => void handleBack()}>
                   ← Voltar
                 </button>
               </div>
@@ -838,7 +1027,7 @@ export const PlayerView: React.FC<Props> = ({ t, session, userId, saveStore, onB
         <div className="stage-box" ref={stageWrapRef}>
           <div className="stage-bar">
             <div className="sb-left">
-              <button className="btn btn-sm" onClick={onBack}>
+              <button className="btn btn-sm" onClick={() => void handleBack()}>
                 ← {t.backHome}
               </button>
               <div className="sb-title">
@@ -876,6 +1065,9 @@ export const PlayerView: React.FC<Props> = ({ t, session, userId, saveStore, onB
                   <Icon name="save" size={15} /> Salvar
                 </button>
               )}
+              <button className="btn btn-sm btn-ghost" onClick={() => setShowPadSetup(true)}>
+                🎮 Controle Bluetooth
+              </button>
               <button className="btn btn-sm btn-ghost" onClick={() => setShowAdvanced((v) => !v)}>
                 ⚙️ {showAdvanced ? 'Ocultar Painel' : 'Controles'}
               </button>
@@ -912,6 +1104,8 @@ export const PlayerView: React.FC<Props> = ({ t, session, userId, saveStore, onB
                 <canvas ref={canvasRef} />
               )}
 
+              {resumeOverlay}
+
               {bootStatus && (
                 <div className="boot-overlay">
                   <div className="glass-spinner" />
@@ -934,7 +1128,7 @@ export const PlayerView: React.FC<Props> = ({ t, session, userId, saveStore, onB
                   <div className="boot-error">
                     <strong>Não foi possível iniciar este arquivo</strong>
                     <span>{bootError}</span>
-                    <button className="btn btn-primary" onClick={onBack}>
+                    <button className="btn btn-primary" onClick={() => void handleBack()}>
                       ← Voltar para a Loja
                     </button>
                   </div>
@@ -973,6 +1167,14 @@ export const PlayerView: React.FC<Props> = ({ t, session, userId, saveStore, onB
           connectedPads={remotePads}
           bluetoothPads={btPads}
           onClose={() => setShowQrModal(false)}
+        />
+      )}
+
+      {showPadSetup && (
+        <ControllerSetupModal
+          adapter={btAdapterRef.current}
+          consoleId={session.consoleId}
+          onClose={() => setShowPadSetup(false)}
         />
       )}
 

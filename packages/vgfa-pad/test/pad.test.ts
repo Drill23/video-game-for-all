@@ -100,3 +100,64 @@ test('Bomba de estado reenvia o estado completo (botão nunca fica preso nem som
 function createEmptyForTest() {
   return { buttons: 0, lx: 0, ly: 0, rx: 0, ry: 0, l2Pressure: 0, r2Pressure: 0, crossPressure: 0, squarePressure: 0, slot: 0, seq: 0 };
 }
+
+function fakePad(index: number, id: string, mapping: string, nButtons: number, axes: number[]) {
+  return {
+    index,
+    id,
+    mapping,
+    connected: true,
+    timestamp: 0,
+    axes: [...axes],
+    buttons: Array.from({ length: nButtons }, () => ({ pressed: false, touched: false, value: 0 })),
+  };
+}
+
+function installFakePads(pads: unknown[]) {
+  Object.defineProperty(globalThis.navigator, 'getGamepads', { configurable: true, value: () => pads });
+}
+
+test('8BitDo em D-input: fantasma na posição 0 não rouba o P1, botões e direcional (hat) funcionam', async () => {
+  const { BluetoothGamepadAdapter, decodeHat } = await import('../src/index.js');
+  // posição 0: dispositivo HID parado (comum no Mac); posição 1: 8BitDo SN30 Pro em D-input
+  const ghost = fakePad(0, 'Generic USB Receiver (Vendor: 1234 Product: 5678)', '', 12, [0, 0]);
+  const bitdo = fakePad(1, '8BitDo SN30 Pro (Vendor: 2dc8 Product: 6101)', '', 15, [0, 0, 0, 0, 0, 0, 0, 0, 0, 1.2857]);
+  installFakePads([ghost, bitdo]);
+  const adapter = new BluetoothGamepadAdapter();
+  assert.equal(adapter.pollAll().size, 0, 'ninguém apertou nada ainda');
+
+  bitdo.buttons[0] = { pressed: true, touched: true, value: 1 }; // A do 8BitDo
+  let states = adapter.pollAll();
+  assert.equal(states.size, 1);
+  const p1 = states.get(0)!;
+  assert.equal(p1.buttons & PAD_BIT.EAST, PAD_BIT.EAST, 'A do 8BitDo (layout Nintendo) = EAST');
+
+  bitdo.buttons[0] = { pressed: false, touched: false, value: 0 };
+  bitdo.axes[9] = -1 + (2 / 7) * 2; // hat → direita
+  states = adapter.pollAll();
+  assert.equal(states.get(0)!.buttons & PAD_BIT.RIGHT, PAD_BIT.RIGHT, 'direcional pelo eixo hat');
+  assert.equal(decodeHat(1.2857), 0, 'hat em repouso = nada apertado');
+  assert.equal(decodeHat(-1), PAD_BIT.UP);
+  const desc = adapter.describe().find((d) => d.index === 1)!;
+  assert.equal(desc.mapping, 'profile');
+  assert.equal(desc.slot, 0);
+});
+
+test('Controle no mapeamento padrão (Xbox/DualSense/8BitDo X-input) e mapeamento manual detectado', async () => {
+  const { BluetoothGamepadAdapter, detectPressedSource } = await import('../src/index.js');
+  const xbox = fakePad(0, 'Xbox Wireless Controller (STANDARD GAMEPAD Vendor: 045e Product: 0b13)', 'standard', 17, [0, 0, 0, 0]);
+  installFakePads([xbox]);
+  const adapter = new BluetoothGamepadAdapter();
+  xbox.buttons[12] = { pressed: true, touched: true, value: 1 };
+  xbox.buttons[9] = { pressed: true, touched: true, value: 1 };
+  xbox.axes[0] = -0.9;
+  const s = adapter.pollAll().get(0)!;
+  assert.equal(s.buttons & (PAD_BIT.UP | PAD_BIT.START), PAD_BIT.UP | PAD_BIT.START);
+  assert.ok(s.lx < -0.8);
+  const before = { buttons: [0, 0, 0], axes: [0, 0, 0, 0, 0, 0, 0, 0, 0, 1.2857] };
+  assert.deepEqual(detectPressedSource(before, { buttons: [0, 1, 0], axes: before.axes }), { type: 'button', index: 1 });
+  assert.deepEqual(
+    detectPressedSource(before, { buttons: [0, 0, 0], axes: [0, 0, 0, 0, 0, 0, 0, 0, 0, -1] }),
+    { type: 'hat', index: 9, dir: 'up' },
+  );
+});

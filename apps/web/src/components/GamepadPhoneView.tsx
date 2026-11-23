@@ -21,6 +21,8 @@ interface Props {
   onExit?: () => void;
   /** aviso de conexão (ex.: aguardando a tela do jogo voltar) */
   notice?: string | null;
+  /** latência ida-e-volta medida até a tela do jogo */
+  latencyMs?: number | null;
 }
 
 type PointerRole =
@@ -76,6 +78,7 @@ export const GamepadPhoneView: React.FC<Props> = ({
   onConsolePreviewChange,
   onExit,
   notice,
+  latencyMs,
 }) => {
   const profile = CONTROLLER_PROFILES[consoleId];
   const rootRef = useRef<HTMLDivElement | null>(null);
@@ -358,9 +361,13 @@ export const GamepadPhoneView: React.FC<Props> = ({
               ))}
             </select>
           )}
-          <span className={`vp-link tone-${tone.tone}`}>
+          <span
+            className={`vp-link tone-${latencyMs && latencyMs > 180 ? 'warn' : tone.tone}`}
+            title="Latência até a tela do jogo"
+          >
             <i />
             {tone.text}
+            {latencyMs ? ` · ${latencyMs} ms` : ''}
           </span>
           <button data-no-pad className="vp-icon" onClick={toggleHaptics} aria-label="Vibração">
             {haptics ? '📳' : '🔕'}

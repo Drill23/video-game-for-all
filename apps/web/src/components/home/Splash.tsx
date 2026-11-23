@@ -14,7 +14,7 @@ function shouldShow(): boolean {
 }
 
 /** Abertura curta (1x por sessão, até 1,2 s, pulável com um clique). */
-export const Splash: React.FC<{ subtitle: string }> = ({ subtitle }) => {
+export const Splash: React.FC<{ subtitle: string; onDone?: () => void }> = ({ subtitle, onDone }) => {
   const [phase, setPhase] = useState<'show' | 'out' | 'gone'>(() => (shouldShow() ? 'show' : 'gone'));
 
   useEffect(() => {
@@ -27,6 +27,11 @@ export const Splash: React.FC<{ subtitle: string }> = ({ subtitle }) => {
     if (phase !== 'out') return undefined;
     const t2 = window.setTimeout(() => setPhase('gone'), 300);
     return () => window.clearTimeout(t2);
+  }, [phase]);
+
+  useEffect(() => {
+    if (phase === 'gone') onDone?.();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [phase]);
 
   if (phase === 'gone') return null;

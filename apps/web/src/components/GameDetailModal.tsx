@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { CONTROLLER_PROFILES } from '@vgfa/pad';
 import {
   CONSOLE_MAP,
@@ -14,6 +14,24 @@ import { Cover } from './Cover.js';
 import { DownloadButton } from './DownloadButton.js';
 import { Icon } from './Icon.js';
 import { useDialog } from './useDialog.js';
+import { GameCard } from './home/GameCard.js';
+import {
+  ageValue,
+  cleanTitle,
+  consoleBadge,
+  factLine,
+  franchiseOf,
+  highlightsOf,
+  modesOf,
+  playersText,
+  playtimeOf,
+  publisherOf,
+  sizeText,
+  synopsisOf,
+  topRankOf,
+} from './home/gameMeta.js';
+import { similarGames } from './home/homeData.js';
+import { HOME_STRINGS } from './home/strings.js';
 
 interface Props {
   game: StoreGame;
@@ -22,6 +40,8 @@ interface Props {
   onLaunchLocal: (game: StoreGame, file: File) => void;
   onLaunchUrl: (game: StoreGame, url: string, filename?: string) => void;
   onOpenPs2Runtime: (game: StoreGame) => void;
+  /** Abre a ficha de outro jogo ("Mais como este"). */
+  onOpenGame?: (game: StoreGame) => void;
 }
 
 function fmtBytes(bytes: number): string {
@@ -45,11 +65,17 @@ export const GameDetailModal: React.FC<Props> = ({
   onLaunchLocal,
   onLaunchUrl,
   onOpenPs2Runtime,
+  onOpenGame,
 }) => {
   const consoleDef = CONSOLE_MAP[game.consoleId];
   const padProfile = CONTROLLER_PROFILES[game.consoleId];
-  const synopsis =
-    lang === 'en' ? game.synopsisEn : lang === 'es' ? game.synopsisEs : game.synopsisPt;
+  const s = HOME_STRINGS[lang];
+  const synopsis = synopsisOf(game, lang);
+  const facts = factLine(game, s).filter((f) => ['rating', 'year', 'console', 'genre'].includes(f.id));
+  const highlights = highlightsOf(game);
+  const rank = topRankOf(game);
+  const similar = useMemo(() => (onOpenGame ? similarGames(game, 12) : []), [game, onOpenGame]);
+  const title = cleanTitle(game.title);
 
   useDialog(onClose);
 
@@ -92,18 +118,33 @@ export const GameDetailModal: React.FC<Props> = ({
   const playableUrl = game.freeRomUrl ?? savedSource?.url;
   const playableFilename = game.freeRomFilename ?? savedSource?.filename;
 
+  const factRows: Array<[string, string | undefined]> = [
+    [s.factDeveloper, game.developer],
+    [s.factPublisher, publisherOf(game)],
+    [s.factYear, game.year ? String(game.year) : undefined],
+    [s.factGenre, game.genre],
+    [s.factPlayers, game.players ? playersText(game.players, s) : undefined],
+    [s.factModes, modesOf(game).join(' · ') || undefined],
+    [s.factTime, playtimeOf(game)],
+    [s.factSize, game.sizeEstimate ? sizeText(game.sizeEstimate) : undefined],
+    [s.factRating, ageValue(game, s)],
+    [s.factSeries, franchiseOf(game)],
+    [s.factConsole, consoleDef.name],
+  ];
+
   return (
     <div className="modal-backdrop" onClick={onClose}>
       <div
-        className="modal-card detail-modal"
+        className="modal-card detail-modal dx"
         role="dialog"
         aria-modal="true"
         aria-label={game.title}
+        style={{ ['--ph' as string]: consoleDef.accent }}
         onClick={(e) => e.stopPropagation()}
       >
         <div className="sheet-grabber" />
-        <header className="dm-head">
-          <div className="dm-bg" aria-hidden="true">
+        <header className="dx-art">
+          <div className="dx-bg" aria-hidden="true">
             <img
               src={game.coverUrl}
               alt=""
@@ -115,89 +156,117 @@ export const GameDetailModal: React.FC<Props> = ({
             />
           </div>
 
-          <div className="dm-top">
+          <div className="dx-top">
             <span className="chip" style={{ background: 'var(--glass-bg-strong)' }}>
               <i className="dot" style={{ background: consoleDef.accent }} />
               {consoleDef.name}
+              {rank && (game.consoleId === 'ps1' || game.consoleId === 'ps2') && rank <= 10 ? ` · Top ${rank}` : ''}
             </span>
-            <button className="icon-btn modal-close" onClick={onClose} aria-label="Fechar">
+            <button className="icon-btn modal-close" onClick={onClose} aria-label={s.close}>
               <Icon name="close" size={16} />
             </button>
           </div>
 
-          <div className="dm-grid">
-            <div className="dm-cover">
-              <Cover src={game.coverUrl} title={game.title} accent={consoleDef.accent} eager />
+          <div className="dx-hero">
+            <div className="dx-cover">
+              <Cover src={game.coverUrl} title={title} accent={consoleDef.accent} eager />
             </div>
-
-            <div className="dm-title-wrap">
-              <h2 className="dm-title">{game.title}</h2>
-              <div className="dm-chips">
-                <span className="chip" style={{ background: 'var(--glass-bg-strong)' }}>★ {game.rating.toFixed(1)}</span>
-                <span className="chip" style={{ background: 'var(--glass-bg-strong)' }}>{game.year}</span>
-                <span className="chip" style={{ background: 'var(--glass-bg-strong)' }}>{game.genre.split('/')[0].trim()}</span>
-                <span className="chip" style={{ background: 'var(--glass-bg-strong)' }}>{game.players}</span>
-                {game.serial && (
-                  <span className="chip mono" style={{ background: 'var(--glass-bg-strong)' }}>{game.serial}</span>
-                )}
-              </div>
-            </div>
-
-            <div className="dm-info">
-              <p className="dm-syn">{synopsis}</p>
-              <p className="dm-pad">
-                {game.developer} • Controle adaptativo no celular: <strong>{padProfile.title}</strong>
-              </p>
-
-              <div className="dm-actions">
-                {/* Ação principal 1-clique se for jogo livre pronto */}
-                {game.availability === 'free-playable' && game.freeRomUrl && (
-                  <button
-                    className="btn btn-primary btn-lg"
-                    onClick={() => onLaunchUrl(game, game.freeRomUrl!, game.freeRomFilename)}
-                  >
-                    <Icon name="play" size={18} /> Conectar Controle &amp; Jogar
-                  </button>
-                )}
-
-                {/* Ação principal 1-clique se o usuário já vinculou sua fonte */}
-                {savedSource && (
-                  <>
-                    <button
-                      className="btn btn-primary btn-lg"
-                      onClick={() => onLaunchUrl(game, savedSource.url, savedSource.filename)}
-                    >
-                      <Icon name="play" size={18} /> Jogar (Minha Fonte)
-                    </button>
-                    <button
-                      className="btn"
-                      onClick={() => {
-                        removeUserSourceForGame(game.id);
-                        setSavedSource(null);
-                        setCustomUrl('');
-                      }}
-                    >
-                      Trocar Fonte
-                    </button>
-                  </>
-                )}
-
-                {playableUrl && (
-                  <DownloadButton
-                    url={playableUrl}
-                    filename={playableFilename}
-                    meta={{
-                      gameId: game.id,
-                      title: game.title,
-                      consoleId: game.consoleId,
-                      coverUrl: game.coverUrl,
-                    }}
-                  />
-                )}
-              </div>
+            <div className="dx-title-wrap">
+              <h2 className="dx-title">{title}</h2>
+              <ul className="hx-facts">
+                {facts.map((f) => (
+                  <li key={f.id} className={f.id === 'rating' ? 'is-rating' : undefined}>
+                    {f.text}
+                  </li>
+                ))}
+                {game.serial && <li className="mono">{game.serial}</li>}
+              </ul>
+              {highlights.length > 0 && (
+                <ul className="hx-hl" aria-label={s.highlightsTitle}>
+                  {highlights.map((h) => (
+                    <li key={h}>{h}</li>
+                  ))}
+                </ul>
+              )}
             </div>
           </div>
         </header>
+
+        <div className="dx-body">
+          <div className="dm-actions">
+            {/* Ação principal 1-clique se for jogo livre pronto */}
+            {game.availability === 'free-playable' && game.freeRomUrl && (
+              <button
+                className="btn btn-primary btn-lg"
+                onClick={() => onLaunchUrl(game, game.freeRomUrl!, game.freeRomFilename)}
+              >
+                <Icon name="play" size={18} /> Conectar Controle &amp; Jogar
+              </button>
+            )}
+
+            {/* Ação principal 1-clique se o usuário já vinculou sua fonte */}
+            {savedSource && (
+              <>
+                <button
+                  className="btn btn-primary btn-lg"
+                  onClick={() => onLaunchUrl(game, savedSource.url, savedSource.filename)}
+                >
+                  <Icon name="play" size={18} /> Jogar (Minha Fonte)
+                </button>
+                <button
+                  className="btn"
+                  onClick={() => {
+                    removeUserSourceForGame(game.id);
+                    setSavedSource(null);
+                    setCustomUrl('');
+                  }}
+                >
+                  Trocar Fonte
+                </button>
+              </>
+            )}
+          </div>
+
+          <section className="dx-sec">
+            <h3 className="dx-h">{s.synopsisTitle}</h3>
+            <p className="dm-syn">{synopsis}</p>
+            <p className="dm-pad">
+              Controle adaptativo no celular: <strong>{padProfile.title}</strong>
+            </p>
+          </section>
+
+          <section className="dx-sec">
+            <dl className="dx-facts-grid">
+              {factRows
+                .filter((r): r is [string, string] => Boolean(r[1]))
+                .map(([k, v]) => (
+                  <div className="dx-fact" key={k}>
+                    <dt>{k}</dt>
+                    <dd>{v}</dd>
+                  </div>
+                ))}
+            </dl>
+          </section>
+
+          {playableUrl && (
+            <section className="dx-sec dx-device">
+              <h3 className="dx-h">
+                <Icon name="disk" size={18} /> {s.thisDevice}
+              </h3>
+              <p className="dx-hint">{s.thisDeviceHint}</p>
+              <DownloadButton
+                url={playableUrl}
+                filename={playableFilename}
+                meta={{
+                  gameId: game.id,
+                  title: game.title,
+                  consoleId: game.consoleId,
+                  coverUrl: game.coverUrl,
+                }}
+              />
+            </section>
+          )}
+        </div>
 
         {/* Escolha do arquivo / melhor opção para jogos de biblioteca */}
         {game.availability !== 'free-playable' && (
@@ -289,6 +358,60 @@ export const GameDetailModal: React.FC<Props> = ({
             </div>
           </div>
         )}
+
+        <div className="dx-body dx-after">
+          <section className="dx-sec">
+            <h3 className="dx-h">
+              <Icon name="gamepad" size={18} /> {s.howToPlay}
+            </h3>
+            <ul className="dx-how">
+              <li>
+                <Icon name="phone" size={20} />
+                <div>
+                  <strong>{s.how1t}</strong>
+                  <span>{s.how1}</span>
+                </div>
+              </li>
+              <li>
+                <Icon name="gamepad" size={20} />
+                <div>
+                  <strong>{s.how2t}</strong>
+                  <span>{s.how2}</span>
+                </div>
+              </li>
+              <li>
+                <Icon name="keyboard" size={20} />
+                <div>
+                  <strong>{s.how3t}</strong>
+                  <span>{s.how3}</span>
+                </div>
+              </li>
+            </ul>
+          </section>
+
+          {similar.length > 0 && (
+            <section className="dx-sec">
+              <h3 className="dx-h">{s.moreLike}</h3>
+              <div className="dx-more">
+                {similar.map((g) => {
+                  const def = CONSOLE_MAP[g.consoleId];
+                  return (
+                    <GameCard
+                      key={g.id}
+                      title={g.title}
+                      coverUrl={g.coverUrl}
+                      accent={def.accent}
+                      consoleLabel={consoleBadge(g)}
+                      rating={g.rating}
+                      year={g.year}
+                      onOpen={() => onOpenGame?.(g)}
+                    />
+                  );
+                })}
+              </div>
+            </section>
+          )}
+        </div>
       </div>
     </div>
   );

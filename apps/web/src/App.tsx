@@ -1,13 +1,16 @@
 import React, { Suspense, lazy, useEffect, useMemo, useState } from 'react';
 import './styles/theme.css';
 import './styles/home.css';
+import './styles/prisma-tv.css';
 import type { ConsoleId } from '@vgfa/pad';
 import {
   ALL_STORE_GAMES,
   CONSOLES,
   CONSOLE_MAP,
   FREE_PLAYABLE_ROMS,
-  STORE_CATALOG,
+  deleteLibraryEntry,
+  removeLibraryEntry,
+  formatBytes,
   detectConsoleFromFilename,
   detectVgfaBackend,
   getUserSourceForGame,
@@ -23,15 +26,27 @@ import {
   type UserProfile,
 } from '@vgfa/storage';
 import { TRANSLATIONS } from './i18n/translations.js';
-import { GameDetailModal } from './components/GameDetailModal.js';
 import { NexusOptimizerModal, loadNexusProfile, type NexusProfile } from './components/NexusOptimizerModal.js';
-import { LibraryPanel } from './components/LibraryPanel.js';
+import { DownloadExplainerHost } from './components/DownloadExplainer.js';
 import { useLibraryEntries } from './services/useLibrary.js';
 import { Icon } from './components/Icon.js';
+import { ContinueRow, type ContinueItem } from './components/home/ContinueRow.js';
 import { GameCard } from './components/home/GameCard.js';
 import { Hero } from './components/home/Hero.js';
-import { Row } from './components/home/Row.js';
+import { Row, LazyRow, TopItem } from './components/home/Row.js';
 import { Splash } from './components/home/Splash.js';
+import { gateAlreadySeen, markGateSeen, useProfiles } from './components/home/useProfiles.js';
+import { useSpatialNav } from './components/home/useSpatialNav.js';
+import {
+  CATALOG_SORTED,
+  CONSOLE_ROWS,
+  FEATURED,
+  GAME_BY_ID,
+  GENRE_ROWS,
+  TOP_PS1,
+  TOP_PS2,
+} from './components/home/homeData.js';
+import { GENRE_LABEL, consoleBadge } from './components/home/gameMeta.js';
 import { Tabs, type TabId } from './components/home/Tabs.js';
 import { TopBar } from './components/home/TopBar.js';
 import { HOME_STRINGS } from './components/home/strings.js';
@@ -46,6 +61,27 @@ const SaveManagerModal = lazy(() =>
   import('./components/SaveManagerModal.js').then((m) => ({ default: m.SaveManagerModal })),
 );
 const ShareLinkModal = lazy(() => import('./components/ShareLinkModal.js').then((m) => ({ default: m.ShareLinkModal })));
+// Janelas que só abrem com um clique: carregam sob demanda (a home abre mais rápido)
+const loadDetail = () => import('./components/GameDetailModal.js');
+const loadLibrary = () => import('./components/LibraryPanel.js');
+const loadProfiles = () => import('./components/home/Profiles.js');
+const GameDetailModal = lazy(() => loadDetail().then((m) => ({ default: m.GameDetailModal })));
+const LibraryPanel = lazy(() => loadLibrary().then((m) => ({ default: m.LibraryPanel })));
+const ProfileGate = lazy(() => loadProfiles().then((m) => ({ default: m.ProfileGate })));
+const ProfileSheet = lazy(() => loadProfiles().then((m) => ({ default: m.ProfileSheet })));
+
+/** Depois que a home aparece, pré-carrega em segundo plano as janelas mais usadas. */
+function prefetchSecondaryChunks(): void {
+  const run = () => {
+    void loadDetail().catch(() => {});
+    void loadLibrary().catch(() => {});
+    void loadProfiles().catch(() => {});
+  };
+  const ric = (window as Window & { requestIdleCallback?: (cb: () => void, o?: { timeout: number }) => number })
+    .requestIdleCallback;
+  if (ric) ric(run, { timeout: 4000 });
+  else setTimeout(run, 2500);
+}
 
 const SpinnerFallback: React.FC = () => (
   <div className="glass-spinner-wrap" role="status" aria-label="Carregando">
@@ -59,11 +95,6 @@ const ROM_ACCEPT =
 function resolveMode(consoleId: ConsoleId): PlayerMode {
   const def = CONSOLE_MAP[consoleId];
   return def.engineTier === 'vgfa-ps2-webgpu' ? 'ps2-webgpu-lab' : 'emulatorjs-rom';
-}
-
-/** Rótulo curto para selos de capa. */
-function badgeLabel(def: { id: string; shortName: string }): string {
-  return def.id === 'ps2' ? 'PS2' : def.shortName;
 }
 
 function fmtSize(bytes: number): string {
@@ -99,24 +130,6 @@ function resolveSubRoute(): { kind: 'home' | 'pad' | 'watch'; code?: string } {
   }
   return { kind: 'home' };
 }
-
-const CATALOG_SORTED = [...STORE_CATALOG].sort(
-  (a, b) => (a.featuredRank ?? 99) - (b.featuredRank ?? 99) || b.rating - a.rating,
-);
-
-/** Destaques: intercala jogos 1-clique com os mais bem colocados do catálogo. */
-function buildFeatured(): StoreGame[] {
-  const free = [...FREE_PLAYABLE_ROMS].sort((a, b) => b.rating - a.rating).slice(0, 4);
-  const top = CATALOG_SORTED.slice(0, 4);
-  const out: StoreGame[] = [];
-  for (let i = 0; i < Math.max(free.length, top.length); i++) {
-    if (free[i]) out.push(free[i]);
-    if (top[i]) out.push(top[i]);
-  }
-  return out;
-}
-
-const FEATURED = buildFeatured();
 
 /** Roteador: mantém os hooks da home fora das rotas /pad e /watch. */
 export const App: React.FC = () => {
@@ -173,6 +186,7 @@ const HomeApp: React.FC<{ themePref: ThemePref; onTheme: (t: ThemePref) => void 
 
   useEffect(() => {
     void detectVgfaBackend();
+    prefetchSecondaryChunks();
   }, []);
 
   // Busca inteligente livre na web (somente fontes abertas verificadas HTTP 200!)
@@ -181,6 +195,36 @@ const HomeApp: React.FC<{ themePref: ThemePref; onTheme: (t: ThemePref) => void 
   const [webNote, setWebNote] = useState<string | null>(null);
 
   const libraryEntries = useLibraryEntries();
+
+  // Perfis locais, navegação por controle e eventos de outras telas
+  const profiles = useProfiles();
+  const [gate, setGate] = useState<null | 'first' | 'switch'>(null);
+  const [showProfile, setShowProfile] = useState(false);
+  useSpatialNav(!activeSession && !gate);
+
+  useEffect(() => {
+    const onNavigate = (e: Event) => {
+      const tabId = (e as CustomEvent<{ tab?: string }>).detail?.tab;
+      if (tabId === 'home' || tabId === 'store' || tabId === 'library' || tabId === 'pad') {
+        setActiveSession(null);
+        setTab(tabId);
+        window.scrollTo({ top: 0 });
+      }
+    };
+    window.addEventListener('vgfa:navigate', onNavigate);
+    return () => window.removeEventListener('vgfa:navigate', onNavigate);
+  }, []);
+
+  const libraryByGame = useMemo(() => {
+    const byId = new Map<string, LibraryEntry>();
+    const byUrl = new Map<string, LibraryEntry>();
+    for (const e of libraryEntries) {
+      if (e.gameId) byId.set(e.gameId, e);
+      byUrl.set(e.url, e);
+    }
+    return (g: StoreGame): LibraryEntry | undefined =>
+      byId.get(g.id) ?? (g.freeRomUrl ? byUrl.get(g.freeRomUrl) : undefined);
+  }, [libraryEntries]);
 
   const t = TRANSLATIONS[lang];
   const s = HOME_STRINGS[lang];
@@ -292,6 +336,22 @@ const HomeApp: React.FC<{ themePref: ThemePref; onTheme: (t: ThemePref) => void 
 
   const playLibraryEntry = (entry: LibraryEntry, game?: StoreGame) => {
     const found = game ?? findGameForEntry(entry);
+    if (entry.kind === 'ps2-disc') {
+      // Disco PS2 já guardado no aparelho: o runner reaproveita, sem baixar de novo
+      const title = entry.title ?? found?.title ?? entry.filename;
+      auth.recordPlay(entry.gameId ?? found?.id ?? `lib-${entry.filename}`, title, 'ps2');
+      setActiveSession({
+        id: found?.id ?? entry.gameId ?? `lib-${entry.filename.replace(/[^a-zA-Z0-9]/g, '_').toLowerCase()}`,
+        title,
+        consoleId: 'ps2',
+        serial: found?.serial,
+        coverUrl: entry.coverUrl ?? found?.coverUrl,
+        mode: 'ps2-webgpu-lab',
+        remoteUrl: entry.url,
+        romFilename: entry.filename,
+      });
+      return;
+    }
     if (found) {
       launchStoreUrl(found, entry.url, entry.filename);
       return;
@@ -372,19 +432,47 @@ const HomeApp: React.FC<{ themePref: ThemePref; onTheme: (t: ThemePref) => void 
     const def = CONSOLE_MAP[game.consoleId];
     const ready = Boolean(game.freeRomUrl);
     const hasSource = !ready && Boolean(getUserSourceForGame(game.id));
+    const onDevice = Boolean(libraryByGame(game));
     return (
       <GameCard
         key={game.id}
         title={game.title}
         coverUrl={game.coverUrl}
         accent={def.accent}
-        consoleLabel={badgeLabel(def)}
+        consoleLabel={consoleBadge(game)}
         rating={game.rating}
-        meta={`${game.developer} · ${game.year}`}
-        tag={ready ? `▶ ${s.ready}` : hasSource ? `▶ ${s.play}` : undefined}
+        year={game.year}
+        tag={onDevice ? `✓ ${s.onDevice}` : ready ? `▶ ${s.ready}` : hasSource ? `▶ ${s.play}` : undefined}
         onOpen={() => (ready ? playGame(game) : setDetailGame(game))}
       />
     );
+  };
+
+  const consoleNames = (id: ConsoleId) => (id === 'ps2' ? 'PlayStation 2' : CONSOLE_MAP[id].name);
+
+  const myListGames = profiles.list.map((id) => GAME_BY_ID.get(id)).filter((g): g is StoreGame => Boolean(g));
+
+  const continueItems: ContinueItem[] = libraryEntries.slice(0, 14).map((entry) => {
+    const game = findGameForEntry(entry);
+    const def = CONSOLE_MAP[consoleOfEntry(entry, game)];
+    return {
+      key: entry.key,
+      title: entry.title ?? game?.title ?? entry.filename,
+      coverUrl: entry.coverUrl ?? game?.coverUrl,
+      accent: def.accent,
+      consoleLabel: def.id === 'ps2' ? 'PS2' : def.shortName,
+      rating: game?.rating,
+      year: game?.year,
+      meta: `${s.resume} · ${timeAgo(entry.lastPlayedAt, lang)}`,
+      sizeLabel: formatBytes(entry.sizeBytes),
+      onPlay: () => playLibraryEntry(entry, game),
+      onDelete: () => (entry.kind === 'ps2-disc' ? removeLibraryEntry(entry.url) : deleteLibraryEntry(entry.url)),
+    };
+  });
+
+  const closeGate = () => {
+    markGateSeen();
+    setGate(null);
   };
 
   const seeAllConsole = (id: ConsoleId | 'all') => {
@@ -394,7 +482,12 @@ const HomeApp: React.FC<{ themePref: ThemePref; onTheme: (t: ThemePref) => void 
 
   return (
     <>
-      <Splash subtitle={s.brandSub} />
+      <Splash
+        subtitle={s.brandSub}
+        onDone={() => {
+          if (!gateAlreadySeen() && !profiles.active) setGate('first');
+        }}
+      />
 
       <TopBar
         s={s}
@@ -422,6 +515,9 @@ const HomeApp: React.FC<{ themePref: ThemePref; onTheme: (t: ThemePref) => void 
         onPickFile={handleLocalFilePick}
         onBrand={() => goTab('home')}
         padHref={padHref}
+        profile={profiles.active}
+        onProfileSheet={() => setShowProfile(true)}
+        onProfileSwitch={() => setGate('switch')}
       />
 
       {activeSession ? (
@@ -435,11 +531,23 @@ const HomeApp: React.FC<{ themePref: ThemePref; onTheme: (t: ThemePref) => void 
           />
         </Suspense>
       ) : (
-        <main className="vgfa-shell page">
+        <main className="page">
+          {tab === 'home' && (
+            <Hero
+              games={FEATURED}
+              lang={lang}
+              s={s}
+              libraryFor={libraryByGame}
+              inList={profiles.isInList}
+              onPlay={playGame}
+              onResume={(g, entry) => playLibraryEntry(entry, g)}
+              onDetails={setDetailGame}
+              onToggleList={(g) => profiles.toggleInList(g.id)}
+            />
+          )}
+          <div className="vgfa-shell">
           {tab === 'home' && (
             <>
-              <Hero games={FEATURED} lang={lang} s={s} onPlay={playGame} onDetails={setDetailGame} />
-
               {!nexusProfile && !bannerHidden && (
                 <div className="nexus-banner glass">
                   <span className="nexus-banner-ico">
@@ -455,70 +563,107 @@ const HomeApp: React.FC<{ themePref: ThemePref; onTheme: (t: ThemePref) => void 
                 </div>
               )}
 
-              {libraryEntries.length > 0 && (
-                <Row
+              {continueItems.length > 0 && (
+                <ContinueRow
+                  s={s}
+                  items={continueItems}
                   title={s.continuePlaying}
                   subtitle={s.continueSub}
-                  leftLabel={s.scrollLeft}
-                  rightLabel={s.scrollRight}
                   seeAllLabel={s.seeAll}
                   onSeeAll={() => goTab('library')}
+                />
+              )}
+
+              {myListGames.length > 0 && (
+                <Row
+                  title={s.myList}
+                  subtitle={s.myListSub}
+                  leftLabel={s.scrollLeft}
+                  rightLabel={s.scrollRight}
                 >
-                  {libraryEntries.slice(0, 14).map((entry) => {
-                    const game = findGameForEntry(entry);
-                    const def = CONSOLE_MAP[consoleOfEntry(entry, game)];
-                    return (
-                      <GameCard
-                        key={entry.key}
-                        title={entry.title ?? game?.title ?? entry.filename}
-                        coverUrl={entry.coverUrl ?? game?.coverUrl}
-                        accent={def.accent}
-                        consoleLabel={badgeLabel(def)}
-                        meta={`${s.resume} · ${timeAgo(entry.lastPlayedAt, lang)}`}
-                        tag={fmtSize(entry.sizeBytes) || undefined}
-                        onOpen={() => playLibraryEntry(entry, game)}
-                      />
-                    );
-                  })}
+                  {myListGames.map(renderStoreCard)}
                 </Row>
               )}
 
-              <Row
-                title={s.freeNow}
-                subtitle={s.freeNowSub}
-                leftLabel={s.scrollLeft}
-                rightLabel={s.scrollRight}
-                seeAllLabel={s.seeAll}
-                onSeeAll={() => seeAllConsole('all')}
-              >
-                {FREE_PLAYABLE_ROMS.map(renderStoreCard)}
-              </Row>
-
-              <Row
-                title={s.topPs2}
-                leftLabel={s.scrollLeft}
-                rightLabel={s.scrollRight}
-                seeAllLabel={s.seeAll}
-                onSeeAll={() => seeAllConsole('ps2')}
-              >
-                {CATALOG_SORTED.filter((g) => g.consoleId === 'ps2')
-                  .slice(0, 16)
-                  .map(renderStoreCard)}
-              </Row>
-
-              {consoleRows.map(({ def, games }) => (
+              <LazyRow eager title={s.topPs2}>
                 <Row
-                  key={def.id}
-                  title={def.name}
-                  subtitle={def.generation}
+                  title={s.topPs2}
+                  variant="top10"
                   leftLabel={s.scrollLeft}
                   rightLabel={s.scrollRight}
                   seeAllLabel={s.seeAll}
-                  onSeeAll={() => seeAllConsole(def.id)}
+                  onSeeAll={() => seeAllConsole('ps2')}
                 >
-                  {games.map(renderStoreCard)}
+                  {TOP_PS2.map((g, i) => (
+                    <TopItem key={g.id} rank={i + 1}>
+                      {renderStoreCard(g)}
+                    </TopItem>
+                  ))}
                 </Row>
+              </LazyRow>
+
+              <LazyRow eager title={s.freeNow}>
+                <Row
+                  title={s.freeNow}
+                  subtitle={s.freeNowSub}
+                  leftLabel={s.scrollLeft}
+                  rightLabel={s.scrollRight}
+                  seeAllLabel={s.seeAll}
+                  onSeeAll={() => seeAllConsole('all')}
+                >
+                  {FREE_PLAYABLE_ROMS.map(renderStoreCard)}
+                </Row>
+              </LazyRow>
+
+              {TOP_PS1.length > 0 && (
+                <LazyRow title={s.topPs1}>
+                  <Row
+                    title={s.topPs1}
+                    variant="top10"
+                    leftLabel={s.scrollLeft}
+                    rightLabel={s.scrollRight}
+                    seeAllLabel={s.seeAll}
+                    onSeeAll={() => seeAllConsole('ps1')}
+                  >
+                    {TOP_PS1.map((g, i) => (
+                      <TopItem key={g.id} rank={i + 1}>
+                        {renderStoreCard(g)}
+                      </TopItem>
+                    ))}
+                  </Row>
+                </LazyRow>
+              )}
+
+              {GENRE_ROWS.map(({ id, games }) => (
+                <LazyRow key={`g-${id}`} title={GENRE_LABEL[lang][id]}>
+                  <Row
+                    title={GENRE_LABEL[lang][id]}
+                    leftLabel={s.scrollLeft}
+                    rightLabel={s.scrollRight}
+                  >
+                    {games.map(renderStoreCard)}
+                  </Row>
+                </LazyRow>
               ))}
+
+              {CONSOLE_ROWS.map(({ id, games }) => {
+                const def = CONSOLE_MAP[id];
+                const title = id === 'ps2' || id === 'ps1' ? s.moreOf.replace('{c}', consoleNames(id)) : def.name;
+                return (
+                  <LazyRow key={`c-${id}`} title={title}>
+                    <Row
+                      title={title}
+                      subtitle={def.generation}
+                      leftLabel={s.scrollLeft}
+                      rightLabel={s.scrollRight}
+                      seeAllLabel={s.seeAll}
+                      onSeeAll={() => seeAllConsole(id)}
+                    >
+                      {games.map(renderStoreCard)}
+                    </Row>
+                  </LazyRow>
+                );
+              })}
             </>
           )}
 
@@ -676,7 +821,9 @@ const HomeApp: React.FC<{ themePref: ThemePref; onTheme: (t: ThemePref) => void 
 
           {tab === 'library' && (
             <div className="store-view">
-              <LibraryPanel games={ALL_STORE_GAMES} onPlay={playLibraryEntry} />
+              <Suspense fallback={<SpinnerFallback />}>
+                <LibraryPanel games={ALL_STORE_GAMES} onPlay={playLibraryEntry} />
+              </Suspense>
             </div>
           )}
 
@@ -712,23 +859,69 @@ const HomeApp: React.FC<{ themePref: ThemePref; onTheme: (t: ThemePref) => void 
 
           <footer className="vgfa-footer">
             <span>{t.footerCredit}</span>
+            <span className="tv-hint">{s.tvHint}</span>
             <span>Atari 2600 · NES · Mega Drive · SNES · GBA · N64 · PS1 · PSP · PS2</span>
           </footer>
+          </div>
         </main>
       )}
 
       {!activeSession && <Tabs s={s} tab={tab} onTab={goTab} variant="bar" />}
 
+      <Suspense fallback={null}>
       {detailGame && (
         <GameDetailModal
+          key={detailGame.id}
           game={detailGame}
           lang={lang}
           onClose={() => setDetailGame(null)}
           onLaunchLocal={launchStoreLocal}
           onLaunchUrl={launchStoreUrl}
           onOpenPs2Runtime={openPs2RuntimeForGame}
+          onOpenGame={setDetailGame}
         />
       )}
+      </Suspense>
+
+      <DownloadExplainerHost />
+
+      <Suspense fallback={null}>
+      {gate && (
+        <ProfileGate
+          s={s}
+          mode={gate}
+          profiles={profiles.profiles}
+          activeId={profiles.active?.id ?? null}
+          ambient={FEATURED[0]?.coverUrl}
+          onPick={(id) => {
+            profiles.select(id);
+            closeGate();
+          }}
+          onCreate={profiles.create}
+          onUpdate={profiles.update}
+          onDelete={profiles.remove}
+          onClose={closeGate}
+        />
+      )}
+
+      {showProfile && (
+        <ProfileSheet
+          s={s}
+          profile={profiles.active}
+          entries={libraryEntries}
+          listCount={profiles.list.length}
+          onClose={() => setShowProfile(false)}
+          onEdit={() => {
+            setShowProfile(false);
+            setGate('switch');
+          }}
+          onSwitch={() => {
+            setShowProfile(false);
+            setGate('switch');
+          }}
+        />
+      )}
+      </Suspense>
 
       <Suspense fallback={null}>
         {showAuth && (
